@@ -51,16 +51,17 @@ local lanes = setmetatable({}, lanesMeta)
 -- and 'table' visible.
 --
 local assert = assert(assert)
+local error = assert(error)
 local io = assert(io)
+local pairs = assert(pairs)
 local string_gmatch = assert(string.gmatch)
 local string_format = assert(string.format)
 local select = assert(select)
 local setmetatable = assert(setmetatable)
 local table_insert = assert(table.insert)
-local type = assert(type)
-local pairs = assert(pairs)
+local tonumber = assert(tonumber)
 local tostring = assert(tostring)
-local error = assert(error)
+local type = assert(type)
 
 -- #################################################################################################
 
@@ -71,7 +72,7 @@ local default_params =
     on_state_create = nil,
     shutdown_timeout = 0.25,
     shutdown_mode = "hard",
-    with_timers = true,
+    with_timers = false,
     track_lanes = false,
     demote_full_userdata = nil,
     verbose_errors = false,
@@ -208,25 +209,29 @@ end
 
 local opt_validators =
 {
-    priority = function(v_)
+    gc_cb = function(v_)
         local tv = type(v_)
-        return (tv == "number") and v_ or raise_option_error("priority", tv, v_)
+        return (tv == "function") and v_ or raise_option_error("gc_cb", tv, v_)
     end,
     globals = function(v_)
         local tv = type(v_)
         return (tv == "table") and v_ or raise_option_error("globals", tv, v_)
     end,
+    name = function(v_)
+        local tv = type(v_)
+        return (tv == "string") and v_ or raise_option_error("name", tv, v_)
+    end,
     package = function(v_)
         local tv = type(v_)
         return (tv == "table") and v_ or raise_option_error("package", tv, v_)
     end,
+    priority = function(v_)
+        local tv = type(v_)
+        return (tv == "number") and v_ or raise_option_error("priority", tv, v_)
+    end,
     required = function(v_)
         local tv = type(v_)
         return (tv == "table") and v_ or raise_option_error("required", tv, v_)
-    end,
-    gc_cb = function(v_)
-        local tv = type(v_)
-        return (tv == "function") and v_ or raise_option_error("gc_cb", tv, v_)
     end
 }
 
@@ -338,10 +343,10 @@ local gen = function(...)
     end
 
     local core_lane_new = assert(core.lane_new)
-    local priority, globals, package, required, gc_cb = opt.priority, opt.globals, opt.package or package, opt.required, opt.gc_cb
+    local priority, globals, package, required, gc_cb, name = opt.priority, opt.globals, opt.package or package, opt.required, opt.gc_cb, opt.name
     return function(...)
         -- must pass functions args last else they will be truncated to the first one
-        return core_lane_new(func, libs, priority, globals, package, required, gc_cb, ...)
+        return core_lane_new(func, libs, priority, globals, package, required, gc_cb, name, ...)
     end
 end -- gen()
 
@@ -569,7 +574,7 @@ local configure_timers = function()
                 end
             end
         end -- timer_body()
-        timer_lane = gen("*", { package= {}, priority = core.max_prio}, timer_body)() -- "*" instead of "io,package" for LuaJIT compatibility...
+        timer_lane = gen("*", { package= {}, priority = core.max_prio, name = "LanesTimer"}, timer_body)() -- "*" instead of "io,package" for LuaJIT compatibility...
     end -- first_time
 
     -----
@@ -621,8 +626,12 @@ end
 --
 -- PUBLIC LANES API
 local sleep = function(seconds_)
-    seconds_ = seconds_ or 0.0 -- this causes false and nil to be a valid input, equivalent to 0.0, but that's ok
-    if type(seconds_) ~= "number" then
+    local type = type(seconds_)
+    if type == "string" then
+        seconds_ = (seconds_ ~= 'indefinitely') and tonumber(seconds_) or nil
+    elseif type == "nil" then
+        seconds_ = 0
+    elseif type ~= "number" then
         error("invalid duration " .. string_format("%q", tostring(seconds_)))
     end
     -- receive data on a channel no-one ever sends anything, thus blocking for the specified duration

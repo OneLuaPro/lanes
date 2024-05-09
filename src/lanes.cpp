@@ -169,17 +169,12 @@ Lane::Lane(Universe* U_, lua_State* L_)
 
 // #################################################################################################
 
-bool Lane::waitForCompletion(lua_Duration duration_)
+bool Lane::waitForCompletion(std::chrono::time_point<std::chrono::steady_clock> until_)
 {
-    std::chrono::time_point<std::chrono::steady_clock> until{ std::chrono::time_point<std::chrono::steady_clock>::max() };
-    if (duration_.count() >= 0.0) {
-        until = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(duration_);
-    }
-
     std::unique_lock lock{ doneMutex };
     // std::stop_token token{ thread.get_stop_token() };
     // return doneCondVar.wait_until(lock, token, secs_, [this](){ return status >= Lane::Done; });
-    return doneCondVar.wait_until(lock, until, [this]() { return status >= Lane::Done; });
+    return doneCondVar.wait_until(lock, until_, [this]() { return status >= Lane::Done; });
 }
 
 // #################################################################################################
@@ -201,8 +196,8 @@ void Lane::startThread(int priority_)
  */
 #define ERROR_FULL_STACK 1 // must be either 0 or 1 as we do some index arithmetics with it!
 
-// intern the debug name in the specified lua state so that the pointer remains valid when the lane's state is closed
-static void securize_debug_threadname(lua_State* L_, Lane* lane_)
+// intern the debug name in the caller lua state so that the pointer remains valid after the lane's state is closed
+void Lane::securizeDebugName(lua_State* L_)
 {
     STACK_CHECK_START_REL(L_, 0);
     STACK_GROW(L_, 3);
@@ -212,8 +207,8 @@ static void securize_debug_threadname(lua_State* L_, Lane* lane_)
     // we don't care about the actual key, so long as it's unique and can't collide with anything.
     lua_newtable(L_);                                                                              // L_: lane ... {uv} {}
     // Lua 5.1 can't do 'lane_->debugName = lua_pushstring(L_, lane_->debugName);'
-    lua_pushstring(L_, lane_->debugName);                                                          // L_: lane ... {uv} {} name
-    lane_->debugName = lua_tostring(L_, -1);
+    lua_pushstring(L_, debugName);                                                                 // L_: lane ... {uv} {} name
+    debugName = lua_tostring(L_, -1);
     lua_rawset(L_, -3);                                                                            // L_: lane ... {uv}
     lua_pop(L_, 1);                                                                                // L_: lane
     STACK_CHECK(L_, 0);
@@ -393,14 +388,6 @@ static void push_stack_trace(lua_State* L_, int rc_, int stk_base_)
 // ########################################### Threads #############################################
 // #################################################################################################
 
-//
-// Protects modifying the selfdestruct chain
-
-#define SELFDESTRUCT_END ((Lane*) (-1))
-//
-// The chain is ended by '(Lane*)(-1)', not nullptr:
-//      'selfdestructFirst -> ... -> ... -> (-1)'
-
 /*
  * Add the lane to selfdestruct chain; the ones still running at the end of the
  * whole process will be cancelled.
@@ -442,99 +429,6 @@ static void selfdestruct_add(Lane* lane_)
         assert(found);
     }
     return found;
-}
-
-// #################################################################################################
-
-// process end: cancel any still free-running threads
-[[nodiscard]] static int universe_gc(lua_State* L_)
-{
-    Universe* const U{ lua_tofulluserdata<Universe>(L_, 1) };
-    lua_Duration const shutdown_timeout{ lua_tonumber(L_, lua_upvalueindex(1)) };
-    [[maybe_unused]] char const* const op_string{ lua_tostring(L_, lua_upvalueindex(2)) };
-    CancelOp const op{ which_cancel_op(op_string) };
-
-    if (U->selfdestructFirst != SELFDESTRUCT_END) {
-        // Signal _all_ still running threads to exit (including the timer thread)
-        {
-            std::lock_guard<std::mutex> guard{ U->selfdestructMutex };
-            Lane* lane{ U->selfdestructFirst };
-            lua_Duration timeout{ 1us };
-            while (lane != SELFDESTRUCT_END) {
-                // attempt the requested cancel with a small timeout.
-                // if waiting on a linda, they will raise a cancel_error.
-                // if a cancellation hook is desired, it will be installed to try to raise an error
-                if (lane->thread.joinable()) {
-                    std::ignore = thread_cancel(lane, op, 1, timeout, true);
-                }
-                lane = lane->selfdestruct_next;
-            }
-        }
-
-        // When noticing their cancel, the lanes will remove themselves from the selfdestruct chain.
-        {
-            std::chrono::time_point<std::chrono::steady_clock> t_until{ std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(shutdown_timeout) };
-
-            while (U->selfdestructFirst != SELFDESTRUCT_END) {
-                // give threads time to act on their cancel
-                std::this_thread::yield();
-                // count the number of cancelled thread that didn't have the time to act yet
-                int n{ 0 };
-                {
-                    std::lock_guard<std::mutex> guard{ U->selfdestructMutex };
-                    Lane* lane{ U->selfdestructFirst };
-                    while (lane != SELFDESTRUCT_END) {
-                        if (lane->cancelRequest != CancelRequest::None)
-                            ++n;
-                        lane = lane->selfdestruct_next;
-                    }
-                }
-                // if timeout elapsed, or we know all threads have acted, stop waiting
-                std::chrono::time_point<std::chrono::steady_clock> t_now = std::chrono::steady_clock::now();
-                if (n == 0 || (t_now >= t_until)) {
-                    DEBUGSPEW_CODE(fprintf(stderr, "%d uncancelled lane(s) remain after waiting %fs at process end.\n", n, shutdown_timeout.count()));
-                    break;
-                }
-            }
-        }
-
-        // If some lanes are currently cleaning after themselves, wait until they are done.
-        // They are no longer listed in the selfdestruct chain, but they still have to lua_close().
-        while (U->selfdestructingCount.load(std::memory_order_acquire) > 0) {
-            std::this_thread::yield();
-        }
-    }
-
-    // If after all this, we still have some free-running lanes, it's an external user error, they should have stopped appropriately
-    {
-        std::lock_guard<std::mutex> guard{ U->selfdestructMutex };
-        Lane* lane{ U->selfdestructFirst };
-        if (lane != SELFDESTRUCT_END) {
-            // this causes a leak because we don't call U's destructor (which could be bad if the still running lanes are accessing it)
-            raise_luaL_error(L_, "Zombie thread %s refuses to die!", lane->debugName);
-        }
-    }
-
-    // no need to mutex-protect this as all threads in the universe are gone at that point
-    if (U->timerLinda != nullptr) { // test in case some early internal error prevented Lanes from creating the deep timer
-        [[maybe_unused]] int const prev_ref_count{ U->timerLinda->refcount.fetch_sub(1, std::memory_order_relaxed) };
-        LUA_ASSERT(L_, prev_ref_count == 1); // this should be the last reference
-        DeepFactory::DeleteDeepObject(L_, U->timerLinda);
-        U->timerLinda = nullptr;
-    }
-
-    close_keepers(U);
-
-    // remove the protected allocator, if any
-    U->protectedAllocator.removeFrom(L_);
-
-    U->Universe::~Universe();
-
-    // universe is no longer available (nor necessary)
-    // we need to do this in case some deep userdata objects were created before Lanes was initialized,
-    // as potentially they will be garbage collected after Lanes at application shutdown
-    universe_store(L_, nullptr);
-    return 0;
 }
 
 // #################################################################################################
@@ -674,23 +568,36 @@ LUAG_FUNC(set_error_reporting)
 
 // #################################################################################################
 
+void Lane::changeDebugName(int nameIdx_)
+{
+    // xxh64 of string "debugName" generated at https://www.pelock.com/products/hash-calculator
+    static constexpr RegistryUniqueKey hidden_regkey{ 0xA194E2645C57F6DDull };
+    nameIdx_ = lua_absindex(L, nameIdx_);
+    luaL_checktype(L, nameIdx_, LUA_TSTRING);                                                      // L: ... "name" ...
+    STACK_CHECK_START_REL(L, 0);
+    // store a hidden reference in the registry to make sure the string is kept around even if a lane decides to manually change the "decoda_name" global...
+    hidden_regkey.setValue(L, [nameIdx = nameIdx_](lua_State* L_) { lua_pushvalue(L_, nameIdx); });// L: ... "name" ...
+    // keep a direct pointer on the string
+    debugName = lua_tostring(L, nameIdx_);
+    // to see VM name in Decoda debugger Virtual Machine window
+    lua_pushvalue(L, nameIdx_);                                                                    // L: ... "name" ... "name"
+    lua_setglobal(L, "decoda_name");                                                               // L: ... "name" ...
+    // and finally set the OS thread name
+    THREAD_SETNAME(debugName);
+    STACK_CHECK(L, 0);
+}
+
+// #################################################################################################
+
+// upvalue #1 is the lane userdata
 LUAG_FUNC(set_debug_threadname)
 {
-    // fnv164 of string "debug_threadname" generated at https://www.pelock.com/products/hash-calculator
-    constexpr RegistryUniqueKey hidden_regkey{ 0x79C0669AAAE04440ull };
     // C s_lane structure is a light userdata upvalue
     Lane* const lane{ lua_tolightuserdata<Lane>(L_, lua_upvalueindex(1)) };
-    luaL_checktype(L_, -1, LUA_TSTRING); // "name"
+    LUA_ASSERT(L_, L_ == lane->L); // this function is exported in a lane's state, therefore it is callable only from inside the Lane's state
     lua_settop(L_, 1);
-    STACK_CHECK_START_ABS(L_, 1);
-    // store a hidden reference in the registry to make sure the string is kept around even if a lane decides to manually change the "decoda_name" global...
-    hidden_regkey.setValue(L_, [](lua_State* L_) { lua_pushvalue(L_, -2); });
-    STACK_CHECK(L_, 1);
-    lane->debugName = lua_tostring(L_, -1);
-    // keep a direct pointer on the string
-    THREAD_SETNAME(lane->debugName);
-    // to see VM name in Decoda debugger Virtual Machine window
-    lua_setglobal(L_, "decoda_name"); //
+    STACK_CHECK_START_REL(L_, 0);
+    lane->changeDebugName(-1);
     STACK_CHECK(L_, 0);
     return 0;
 }
@@ -911,13 +818,14 @@ static constexpr UniqueKey kLaneGC{ 0x5D6122141727F960ull };
 //                   , [package_tbl]
 //                   , [required_tbl]
 //                   , [gc_cb_func]
+//                   , [name]
 //                  [, ... args ...])
 //
 // Upvalues: metatable to use for 'lane_ud'
 //
 LUAG_FUNC(lane_new)
 {
-    // first 7 args: func libs priority globals package required gc_cb
+    // first 8 args: func libs priority globals package required gc_cb name
     char const* const libs_str{ lua_tostring(L_, 2) };
     bool const have_priority{ !lua_isnoneornil(L_, 3) };
     int const priority{ have_priority ? static_cast<int>(lua_tointeger(L_, 3)) : kThreadPrioDefault };
@@ -925,8 +833,9 @@ LUAG_FUNC(lane_new)
     int const package_idx{ lua_isnoneornil(L_, 5) ? 0 : 5 };
     int const required_idx{ lua_isnoneornil(L_, 6) ? 0 : 6 };
     int const gc_cb_idx{ lua_isnoneornil(L_, 7) ? 0 : 7 };
+    int const name_idx{ lua_isnoneornil(L_, 8) ? 0 : 8 };
 
-    static constexpr int kFixedArgsIdx{ 7 };
+    static constexpr int kFixedArgsIdx{ 8 };
     int const nargs{ lua_gettop(L_) - kFixedArgsIdx };
     Universe* const U{ universe_get(L_) };
     LUA_ASSERT(L_, nargs >= 0);
@@ -942,7 +851,7 @@ LUAG_FUNC(lane_new)
     DEBUGSPEW_CODE(fprintf(stderr, INDENT_BEGIN "lane_new: setup\n" INDENT_END(U)));
 
     // populate with selected libraries at the same time. 
-    lua_State* const L2{ luaG_newstate(U, SourceState{ L_ }, libs_str) };                          // L_: [7 args] ...                               L2:
+    lua_State* const L2{ luaG_newstate(U, SourceState{ L_ }, libs_str) };                          // L_: [8 args] ...                               L2:
     STACK_CHECK_START_REL(L2, 0);
 
     // 'lane' is allocated from heap, not Lua, since its life span may surpass the handle's (if free running thread)
@@ -957,14 +866,16 @@ LUAG_FUNC(lane_new)
         lua_State* const m_L;
         Lane* m_lane{ nullptr };
         int const m_gc_cb_idx;
+        int const m_name_idx;
         DEBUGSPEW_CODE(Universe* const U);
         DEBUGSPEW_CODE(DebugSpewIndentScope m_scope);
 
         public:
-        OnExit(lua_State* L_, Lane* lane_, int gc_cb_idx_ DEBUGSPEW_COMMA_PARAM(Universe* U_))
+        OnExit(lua_State* L_, Lane* lane_, int gc_cb_idx_, int name_idx_ DEBUGSPEW_COMMA_PARAM(Universe* U_))
         : m_L{ L_ }
         , m_lane{ lane_ }
         , m_gc_cb_idx{ gc_cb_idx_ }
+        , m_name_idx{ name_idx_ }
         DEBUGSPEW_COMMA_PARAM(U{ U_ })
         DEBUGSPEW_COMMA_PARAM(m_scope{ U_ })
         {
@@ -1019,6 +930,24 @@ LUAG_FUNC(lane_new)
             }
 
             lua_setiuservalue(m_L, -2, 1);                                                         // m_L: ... lane
+
+            lua_State* L2{ m_lane->L };
+            STACK_CHECK_START_REL(L2, 0);
+            char const* const debugName{ (m_name_idx > 0) ? lua_tostring(m_L, m_name_idx) : nullptr };
+            if (debugName)
+            {
+                if (strcmp(debugName, "auto") != 0) {
+                    lua_pushstring(L2, debugName);                                                 // m_L: ... lane                                     L2: "<name>"
+                } else {
+                    lua_Debug ar;
+                    lua_pushvalue(m_L, 1);                                                         // m_L: ... lane func
+                    lua_getinfo(m_L, ">S", &ar);                                                   // m_L: ... lane
+                    lua_pushfstring(L2, "%s:%d", ar.short_src, ar.linedefined);                    // m_L: ... lane                                     L2: "<name>"
+                }
+                m_lane->changeDebugName(-1);
+                lua_pop(L2, 1);                                                                    // m_L: ... lane                                     L2:
+            }
+            STACK_CHECK(L2, 0);
             STACK_CHECK(m_L, 1);
         }
 
@@ -1029,7 +958,7 @@ LUAG_FUNC(lane_new)
             m_lane->ready.count_down();
             m_lane = nullptr;
         }
-    } onExit{ L_, lane, gc_cb_idx DEBUGSPEW_COMMA_PARAM(U) };
+    } onExit{ L_, lane, gc_cb_idx, name_idx DEBUGSPEW_COMMA_PARAM(U) };
     // launch the thread early, it will sync with a std::latch to parallelize OS thread warmup and L2 preparation
     DEBUGSPEW_CODE(fprintf(stderr, INDENT_BEGIN "lane_new: launching thread\n" INDENT_END(U)));
     lane->startThread(priority);
@@ -1037,11 +966,6 @@ LUAG_FUNC(lane_new)
     STACK_GROW(L2, nargs + 3);
     STACK_GROW(L_, 3);
     STACK_CHECK_START_REL(L_, 0);
-
-    // give a default "Lua" name to the thread to see VM name in Decoda debugger
-    lua_pushfstring(L2, "Lane #%p", L2);                                                           // L_: [7 args] args...                           L2: "<name>"
-    lua_setglobal(L2, "decoda_name");                                                              // L_: [7 args] args...                           L2:
-    LUA_ASSERT(L_, lua_gettop(L2) == 0);
 
     // package
     if (package_idx != 0) {
@@ -1062,8 +986,8 @@ LUAG_FUNC(lane_new)
             raise_luaL_error(L_, "expected required module list as a table, got %s", luaL_typename(L_, required_idx));
         }
 
-        lua_pushnil(L_);                                                                           // L_: [7 args] args... nil                       L2:
-        while (lua_next(L_, required_idx) != 0) {                                                  // L_: [7 args] args... n "modname"               L2:
+        lua_pushnil(L_);                                                                           // L_: [8 args] args... nil                       L2:
+        while (lua_next(L_, required_idx) != 0) {                                                  // L_: [8 args] args... n "modname"               L2:
             if (lua_type(L_, -1) != LUA_TSTRING || lua_type(L_, -2) != LUA_TNUMBER || lua_tonumber(L_, -2) != nbRequired) {
                 raise_luaL_error(L_, "required module list should be a list of strings");
             } else {
@@ -1073,30 +997,30 @@ LUAG_FUNC(lane_new)
                 DEBUGSPEW_CODE(fprintf(stderr, INDENT_BEGIN "lane_new: require '%s'\n" INDENT_END(U), name));
 
                 // require the module in the target lane
-                lua_getglobal(L2, "require");                                                      // L_: [7 args] args... n "modname"               L2: require()?
+                lua_getglobal(L2, "require");                                                      // L_: [8 args] args... n "modname"               L2: require()?
                 if (lua_isnil(L2, -1)) {
-                    lua_pop(L2, 1);                                                                // L_: [7 args] args... n "modname"               L2:
+                    lua_pop(L2, 1);                                                                // L_: [8 args] args... n "modname"               L2:
                     raise_luaL_error(L_, "cannot pre-require modules without loading 'package' library first");
                 } else {
-                    lua_pushlstring(L2, name, len);                                                // L_: [7 args] args... n "modname"               L2: require() name
-                    if (lua_pcall(L2, 1, 1, 0) != LUA_OK) {                                        // L_: [7 args] args... n "modname"               L2: ret/errcode
+                    lua_pushlstring(L2, name, len);                                                // L_: [8 args] args... n "modname"               L2: require() name
+                    if (lua_pcall(L2, 1, 1, 0) != LUA_OK) {                                        // L_: [8 args] args... n "modname"               L2: ret/errcode
                         // propagate error to main state if any
                         InterCopyContext c{ U, DestState{ L_ }, SourceState{ L2 }, {}, {}, {}, {}, {} };
-                        std::ignore = c.inter_move(1);                                             // L_: [7 args] args... n "modname" error         L2:
+                        std::ignore = c.inter_move(1);                                             // L_: [8 args] args... n "modname" error         L2:
                         raise_lua_error(L_);
                     }
-                    // here the module was successfully required                                   // L_: [7 args] args... n "modname"               L2: ret
+                    // here the module was successfully required                                   // L_: [8 args] args... n "modname"               L2: ret
                     // after requiring the module, register the functions it exported in our name<->function database
                     populate_func_lookup_table(L2, -1, name);
-                    lua_pop(L2, 1);                                                                // L_: [7 args] args... n "modname"               L2:
+                    lua_pop(L2, 1);                                                                // L_: [8 args] args... n "modname"               L2:
                 }
             }
             lua_pop(L_, 1); // L_: func libs priority globals package required gc_cb [... args ...] n
             ++nbRequired;
-        }                                                                                          // L_: [7 args] args...
+        }                                                                                          // L_: [8 args] args...
     }
     STACK_CHECK(L_, 0);
-    STACK_CHECK(L2, 0);                                                                            // L_: [7 args] args...                           L2:
+    STACK_CHECK(L2, 0);                                                                            // L_: [8 args] args...                           L2:
 
     // Appending the specified globals to the global environment
     // *after* stdlibs have been loaded and modules required, in case we transfer references to native functions they exposed...
@@ -1108,17 +1032,17 @@ LUAG_FUNC(lane_new)
         }
 
         DEBUGSPEW_CODE(DebugSpewIndentScope scope{ U });
-        lua_pushnil(L_);                                                                           // L_: [7 args] args... nil                       L2:
+        lua_pushnil(L_);                                                                           // L_: [8 args] args... nil                       L2:
         // Lua 5.2 wants us to push the globals table on the stack
         InterCopyContext c{ U, DestState{ L2 }, SourceState{ L_ }, {}, {}, {}, {}, {} };
-        lua_pushglobaltable(L2);                                                                   // L_: [7 args] args... nil                       L2: _G
-        while (lua_next(L_, globals_idx)) {                                                        // L_: [7 args] args... k v                       L2: _G
-            std::ignore = c.inter_copy(2);                                                         // L_: [7 args] args... k v                       L2: _G k v
+        lua_pushglobaltable(L2);                                                                   // L_: [8 args] args... nil                       L2: _G
+        while (lua_next(L_, globals_idx)) {                                                        // L_: [8 args] args... k v                       L2: _G
+            std::ignore = c.inter_copy(2);                                                         // L_: [8 args] args... k v                       L2: _G k v
             // assign it in L2's globals table
-            lua_rawset(L2, -3);                                                                    // L_: [7 args] args... k v                       L2: _G
-            lua_pop(L_, 1);                                                                        // L_: [7 args] args... k
-        }                                                                                          // L_: [7 args] args...
-        lua_pop(L2, 1);                                                                            // L_: [7 args] args...                           L2:
+            lua_rawset(L2, -3);                                                                    // L_: [8 args] args... k v                       L2: _G
+            lua_pop(L_, 1);                                                                        // L_: [8 args] args... k
+        }                                                                                          // L_: [8 args] args...
+        lua_pop(L2, 1);                                                                            // L_: [8 args] args...                           L2:
     }
     STACK_CHECK(L_, 0);
     STACK_CHECK(L2, 0);
@@ -1128,16 +1052,16 @@ LUAG_FUNC(lane_new)
     if (func_type == LuaType::FUNCTION) {
         DEBUGSPEW_CODE(fprintf(stderr, INDENT_BEGIN "lane_new: transfer lane body\n" INDENT_END(U)));
         DEBUGSPEW_CODE(DebugSpewIndentScope scope{ U });
-        lua_pushvalue(L_, 1);                                                                      // L_: [7 args] args... func                      L2:
+        lua_pushvalue(L_, 1);                                                                      // L_: [8 args] args... func                      L2:
         InterCopyContext c{ U, DestState{ L2 }, SourceState{ L_ }, {}, {}, {}, {}, {} };
-        InterCopyResult const res{ c.inter_move(1) };                                              // L_: [7 args] args...                           L2: func
+        InterCopyResult const res{ c.inter_move(1) };                                              // L_: [8 args] args...                           L2: func
         if (res != InterCopyResult::Success) {
             raise_luaL_error(L_, "tried to copy unsupported types");
         }
     } else if (func_type == LuaType::STRING) {
         DEBUGSPEW_CODE(fprintf(stderr, INDENT_BEGIN "lane_new: compile lane body\n" INDENT_END(U)));
         // compile the string
-        if (luaL_loadstring(L2, lua_tostring(L_, 1)) != 0) {                                       // L_: [7 args] args...                           L2: func
+        if (luaL_loadstring(L2, lua_tostring(L_, 1)) != 0) {                                       // L_: [8 args] args...                           L2: func
             raise_luaL_error(L_, "error when parsing lane function code");
         }
     } else {
@@ -1152,7 +1076,7 @@ LUAG_FUNC(lane_new)
         DEBUGSPEW_CODE(fprintf(stderr, INDENT_BEGIN "lane_new: transfer lane arguments\n" INDENT_END(U)));
         DEBUGSPEW_CODE(DebugSpewIndentScope scope{ U });
         InterCopyContext c{ U, DestState{ L2 }, SourceState{ L_ }, {}, {}, {}, {}, {} };
-        InterCopyResult const res{ c.inter_move(nargs) };                                          // L_: [7 args]                                   L2: func args...
+        InterCopyResult const res{ c.inter_move(nargs) };                                          // L_: [8 args]                                   L2: func args...
         if (res != InterCopyResult::Success) {
             raise_luaL_error(L_, "tried to copy unsupported types");
         }
@@ -1161,12 +1085,12 @@ LUAG_FUNC(lane_new)
     LUA_ASSERT(L_, lua_gettop(L_) == kFixedArgsIdx);
 
     // Store 'lane' in the lane's registry, for 'cancel_test()' (we do cancel tests at pending send/receive).
-    kLanePointerRegKey.setValue(L2, [lane](lua_State* L_) { lua_pushlightuserdata(L_, lane); });   // L_: [7 args]                                   L2: func args...
+    kLanePointerRegKey.setValue(L2, [lane](lua_State* L_) { lua_pushlightuserdata(L_, lane); });   // L_: [8 args]                                   L2: func args...
     STACK_CHECK(L2, 1 + nargs);
 
     STACK_CHECK_RESET_REL(L_, 0);
     // all went well, the lane's thread can start working
-    onExit.success();                                                                              // L_: [7 args] lane                              L2: <living its own life>
+    onExit.success();                                                                              // L_: [8 args] lane                              L2: <living its own life>
     // we should have the lane userdata on top of the stack
     STACK_CHECK(L_, 1);
     return 1;
@@ -1280,33 +1204,44 @@ void Lane::pushThreadStatus(lua_State* L_)
 LUAG_FUNC(thread_join)
 {
     Lane* const lane{ ToLane(L_, 1) };
-    lua_Duration const duration{ luaL_optnumber(L_, 2, -1.0) };
     lua_State* const L2{ lane->L };
 
-    bool const done{ !lane->thread.joinable() || lane->waitForCompletion(duration) };
+    std::chrono::time_point<std::chrono::steady_clock> until{ std::chrono::time_point<std::chrono::steady_clock>::max() };
+    if (lua_type(L_, 2) == LUA_TNUMBER) { // we don't want to use lua_isnumber() because of autocoercion
+        lua_Duration const duration{ lua_tonumber(L_, 2) };
+        if (duration.count() >= 0.0) {
+            until = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(duration);
+        } else {
+            raise_luaL_argerror(L_, 2, "duration cannot be < 0");
+        }
+
+    } else if (!lua_isnoneornil(L_, 2)) { // alternate explicit "infinite timeout" by passing nil before the key
+        raise_luaL_argerror(L_, 2, "incorrect duration type");
+    }
+
+    bool const done{ !lane->thread.joinable() || lane->waitForCompletion(until) };
+    lua_settop(L_, 1);                                                                             // L_: lane
     if (!done || !L2) {
-        STACK_GROW(L_, 2);
-        lua_pushnil(L_);                                                                           // L_: lane timeout? nil
-        lua_pushliteral(L_, "timeout");                                                            // L_: lane timeout? nil "timeout"
+        lua_pushnil(L_);                                                                           // L_: lane nil
+        lua_pushliteral(L_, "timeout");                                                            // L_: lane nil "timeout"
         return 2;
     }
 
-    STACK_CHECK_START_REL(L_, 0);
+    STACK_CHECK_START_REL(L_, 0);                                                                  // L_: lane
     // Thread is Done/Error/Cancelled; all ours now
 
     int ret{ 0 };
-    Universe* const U{ lane->U };
     // debugName is a pointer to string possibly interned in the lane's state, that no longer exists when the state is closed
     // so store it in the userdata uservalue at a key that can't possibly collide
-    securize_debug_threadname(L_, lane);
+    lane->securizeDebugName(L_);
     switch (lane->status) {
     case Lane::Done:
         {
             int const n{ lua_gettop(L2) }; // whole L2 stack
             if (
                 (n > 0) &&
-                (InterCopyContext{ U, DestState{ L_ }, SourceState{ L2 }, {}, {}, {}, {}, {} }.inter_move(n) != InterCopyResult::Success)
-            ) {                                                                                    // L_: lane timeout? results                       L2:
+                (InterCopyContext{ lane->U, DestState{ L_ }, SourceState{ L2 }, {}, {}, {}, {}, {} }.inter_move(n) != InterCopyResult::Success)
+            ) {                                                                                    // L_: lane results                                L2:
                 raise_luaL_error(L_, "tried to copy unsupported types");
             }
             ret = n;
@@ -1315,12 +1250,12 @@ LUAG_FUNC(thread_join)
 
     case Lane::Error:
         {
-            int const n{ lua_gettop(L2) };                                                         // L_: lane timeout?                               L2: "err" [trace]
+            int const n{ lua_gettop(L2) };                                                         // L_: lane                                        L2: "err" [trace]
             STACK_GROW(L_, 3);
-            lua_pushnil(L_);                                                                       // L_: lane timeout? nil
+            lua_pushnil(L_);                                                                       // L_: lane nil
             // even when ERROR_FULL_STACK, if the error is not LUA_ERRRUN, the handler wasn't called, and we only have 1 error message on the stack ...
-            InterCopyContext c{ U, DestState{ L_ }, SourceState{ L2 }, {}, {}, {}, {}, {} };
-            if (c.inter_move(n) != InterCopyResult::Success) {                                     // L_: lane timeout? nil "err" [trace]             L2:
+            InterCopyContext c{ lane->U, DestState{ L_ }, SourceState{ L2 }, {}, {}, {}, {}, {} };
+            if (c.inter_move(n) != InterCopyResult::Success) {                                     // L_: lane nil "err" [trace]                      L2:
                 raise_luaL_error(L_, "tried to copy unsupported types: %s", lua_tostring(L_, -n));
             }
             ret = 1 + n;
@@ -1496,14 +1431,13 @@ LUAG_FUNC(threads)
     Universe* const U{ universe_get(L_) };
 
     // List _all_ still running threads
-    //
     std::lock_guard<std::mutex> guard{ U->trackingMutex };
     if (U->trackingFirst && U->trackingFirst != TRACKING_END) {
         Lane* lane{ U->trackingFirst };
         int index{ 0 };
         lua_newtable(L_);                                                                          // L_: {}
         while (lane != TRACKING_END) {
-            // insert a { name, status } tuple, so that several lanes with the same name can't clobber each other
+            // insert a { name='<name>', status='<status>' } tuple, so that several lanes with the same name can't clobber each other
             lua_createtable(L_, 0, 2);                                                             // L_: {} {}
             lua_pushstring(L_, lane->debugName);                                                   // L_: {} {} "name"
             lua_setfield(L_, -2, "name");                                                          // L_: {} {}
@@ -1592,17 +1526,20 @@ LUAG_FUNC(wakeup_conv)
 // #################################################################################################
 
 extern int LG_linda(lua_State* L_);
-static struct luaL_Reg const lanes_functions[] = {
-    { "linda", LG_linda },
-    { "now_secs", LG_now_secs },
-    { "wakeup_conv", LG_wakeup_conv },
-    { "set_thread_priority", LG_set_thread_priority },
-    { "set_thread_affinity", LG_set_thread_affinity },
-    { "nameof", luaG_nameof },
-    { "register", LG_register },
-    { "set_singlethreaded", LG_set_singlethreaded },
-    { nullptr, nullptr }
-};
+
+namespace global {
+    static struct luaL_Reg const sLanesFunctions[] = {
+        { "linda", LG_linda },
+        { "now_secs", LG_now_secs },
+        { "wakeup_conv", LG_wakeup_conv },
+        { "set_thread_priority", LG_set_thread_priority },
+        { "set_thread_affinity", LG_set_thread_affinity },
+        { "nameof", luaG_nameof },
+        { "register", LG_register },
+        { "set_singlethreaded", LG_set_singlethreaded },
+        { nullptr, nullptr }
+    };
+} // namespace global
 
 // #################################################################################################
 
@@ -1685,7 +1622,7 @@ LUAG_FUNC(configure)
     lua_pushnil(L_);                                                                               // L_: settings M nil
     lua_setfield(L_, -2, "configure");                                                             // L_: settings M
     // add functions to the module's table
-    luaG_registerlibfuncs(L_, lanes_functions);
+    luaG_registerlibfuncs(L_, global::sLanesFunctions);
 #if HAVE_LANE_TRACKING()
     // register core.threads() only if settings say it should be available
     if (U->trackingFirst != nullptr) {
@@ -1709,7 +1646,7 @@ LUAG_FUNC(configure)
     // prepare the metatable for threads
     // contains keys: { __gc, __index, cached_error, cached_tostring, cancel, join, get_debug_threadname }
     //
-    if (luaL_newmetatable(L_, "Lane")) {                                                           // L_: settings M mt
+    if (luaL_newmetatable(L_, kLaneMetatableName)) {                                               // L_: settings M mt
         lua_pushcfunction(L_, lane_gc);                                                            // L_: settings M mt lane_gc
         lua_setfield(L_, -2, "__gc");                                                              // L_: settings M mt
         lua_pushcfunction(L_, LG_thread_index);                                                    // L_: settings M mt LG_thread_index
@@ -1726,7 +1663,7 @@ LUAG_FUNC(configure)
         lua_setfield(L_, -2, "get_debug_threadname");                                              // L_: settings M mt
         lua_pushcfunction(L_, LG_thread_cancel);                                                   // L_: settings M mt LG_thread_cancel
         lua_setfield(L_, -2, "cancel");                                                            // L_: settings M mt
-        lua_pushliteral(L_, "Lane");                                                               // L_: settings M mt "Lane"
+        lua_pushliteral(L_, kLaneMetatableName);                                                   // L_: settings M mt "Lane"
         lua_setfield(L_, -2, "__metatable");                                                       // L_: settings M mt
     }
 

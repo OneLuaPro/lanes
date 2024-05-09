@@ -10,6 +10,14 @@
 #include <stop_token>
 #include <thread>
 
+// The chain is ended by '(Lane*)(-1)', not nullptr: 'selfdestructFirst -> ... -> ... -> (-1)'
+#define SELFDESTRUCT_END ((Lane*) (-1))
+
+// must be a #define instead of a constexpr to work with lua_pushliteral (until I templatize it)
+#define kLaneMetatableName "Lane"
+#define kLanesLibName "lanes"
+#define kLanesCoreLibName kLanesLibName ".core"
+
 // NOTE: values to be changed by either thread, during execution, without
 //       locking, are marked "volatile"
 //
@@ -86,9 +94,11 @@ class Lane
     Lane(Universe* U_, lua_State* L_);
     ~Lane();
 
-    [[nodiscard]] bool waitForCompletion(lua_Duration duration_);
+    [[nodiscard]] bool waitForCompletion(std::chrono::time_point<std::chrono::steady_clock> until_);
     void startThread(int priority_);
     void pushThreadStatus(lua_State* L_);
+    void changeDebugName(int nameIdx_);
+    void securizeDebugName(lua_State* L_);
 };
 
 // xxh64 of string "kLanePointerRegKey" generated at https://www.pelock.com/products/hash-calculator
@@ -100,5 +110,5 @@ static constexpr RegistryUniqueKey kLanePointerRegKey{ 0x2D8CF03FE9F0A51Aull }; 
 //
 [[nodiscard]] inline Lane* ToLane(lua_State* L_, int i_)
 {
-    return *(static_cast<Lane**>(luaL_checkudata(L_, i_, "Lane")));
+    return *(static_cast<Lane**>(luaL_checkudata(L_, i_, kLaneMetatableName)));
 }

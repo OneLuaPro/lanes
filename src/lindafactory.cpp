@@ -32,7 +32,11 @@ THE SOFTWARE.
 
 #include "lindafactory.h"
 
+#include "lanes_private.h"
 #include "linda.h"
+
+// must be a #define instead of a constexpr to work with lua_pushliteral (until I templatize it)
+#define kLindaMetatableName "Linda"
 
 // #################################################################################################
 
@@ -45,7 +49,7 @@ void LindaFactory::createMetatable(lua_State* L_) const
     lua_setfield(L_, -2, "__index");
 
     // protect metatable from external access
-    lua_pushliteral(L_, "Linda");
+    lua_pushliteral(L_, kLindaMetatableName);
     lua_setfield(L_, -2, "__metatable");
 
     // the linda functions

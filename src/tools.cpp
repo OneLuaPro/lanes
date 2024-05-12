@@ -1268,7 +1268,7 @@ void InterCopyContext::inter_copy_keyvaluepair() const
     // we need to copy over the uservalues of the userdata as well
     {
         int const mt{ lua_absindex(L1, -2) };                                                      // L1: ... mt __lanesclone
-        size_t const userdata_size{ lua_rawlen(L1, L1i) };
+        size_t const userdata_size{ static_cast<size_t>(lua_rawlen(L1, L1i)) };
         // extract all the uservalues, but don't transfer them yet
         int uvi = 0;
         while (lua_getiuservalue(L1, L1i, ++uvi) != LUA_TNONE) {}                                  // L1: ... mt __lanesclone [uv]+ nil
@@ -1417,7 +1417,7 @@ void InterCopyContext::inter_copy_keyvaluepair() const
         source = lua_touserdata(L1, -1);
         void* clone{ nullptr };
         // get the number of bytes to allocate for the clone
-        size_t const userdata_size{ lua_rawlen(L1, -1) };
+        size_t const userdata_size{ static_cast<size_t>(lua_rawlen(L1, -1)) };
         {
             // extract uservalues (don't transfer them yet)
             int uvi = 0;

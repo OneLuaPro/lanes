@@ -6,8 +6,9 @@
 -- To do:
 --      - ...
 --
-
-local require_lanes_result_1, require_lanes_result_2 = require "lanes".configure{ with_timers = false, internal_allocator = "libc"}
+local config = { with_timers = false, strip_functions = false, internal_allocator = "libc"}
+-- calling configure more than once should work (additional called are ignored)
+local require_lanes_result_1, require_lanes_result_2 = require "lanes".configure(config).configure()
 print("require_lanes_result:", require_lanes_result_1, require_lanes_result_2)
 local lanes = require_lanes_result_1
 
@@ -15,7 +16,7 @@ local require_assert_result_1, require_assert_result_2 = require "assert"    -- 
 print("require_assert_result:", require_assert_result_1, require_assert_result_2)
 
 local lanes_gen=    assert(lanes.gen)
-local lanes_linda=  assert(lanes.linda)
+local lanes_linda = assert(lanes.linda)
 
 local tostring=     assert(tostring)
 
@@ -27,6 +28,11 @@ local function PRINT(...)
     if io then
         io.stderr:write(str.."\n")
     end
+end
+
+local SLEEP = function(...)
+    local k, v = lanes.sleep(...)
+    assert(k == nil and v == "timeout")
 end
 
 local gc_cb = function(name_, status_)
@@ -70,7 +76,7 @@ end
 PRINT("\n\n", "---=== Tasking (basic) ===---", "\n\n")
 
 local function task(a, b, c)
-    set_debug_threadname("task("..a..","..b..","..c..")")
+    lane_threadname("task("..a..","..b..","..c..")")
     --error "111"     -- testing error messages
     assert(hey)
     local v=0
@@ -86,6 +92,8 @@ local task_launch= lanes_gen("", { globals={hey=true}, gc_cb = gc_cb}, task)
 -- 'task_launch' is a factory of multithreaded tasks, we can launch several:
 
 local lane1= task_launch(100,200,3)
+assert.fails(function() print(lane1[lane1]) end) -- indexing the lane with anything other than a string or a number should fail
+
 local lane2= task_launch(200,300,4)
 
 -- At this stage, states may be "pending", "running" or "done"
@@ -142,7 +150,8 @@ if st=="done" then
 end
 assert(st=="running")
 
-lane9:cancel("count", 100) -- 0 timeout, 100 instructions count hook
+-- when running under luajit, the function is JIT-ed, and the instruction count isn't hit, so we need a different hook
+lane9:cancel(jit and "line" or "count", 100) -- 0 timeout, hook triggers cancelslation when reaching the specified count
 
 local t0= os.time()
 while os.time()-t0 < 5 do
@@ -151,11 +160,12 @@ while os.time()-t0 < 5 do
     if st~="running" then break end
 end
 PRINT(" "..st)
-assert(st == "cancelled")
+assert(st == "cancelled", "st is '" .. st .. "' instead of 'cancelled'")
 
 -- cancellation of lanes waiting on a linda
-local limited = lanes.linda("limited")
-limited:limit("key", 1)
+local limited = lanes_linda("limited")
+assert.fails(function() limited:limit("key", -1) end)
+assert.failsnot(function() limited:limit("key", 1) end)
 -- [[################################################
 limited:send("key", "hello") -- saturate linda
 for k, v in pairs(limited:dump()) do
@@ -211,28 +221,29 @@ local function WR(...) io.stderr:write(...) end
 
 local chunk= function(linda)
     local function receive() return linda:receive("->") end
-    local function send(...) linda:send("<-", ...) end
+    local function send(...) local _res, _err = linda:send("<-", ...) assert(_res == true and _err == nil) end
 
-    WR("Lane starts!\n")
+    WR("chunk ", "Lane starts!\n")
 
     local k,v
-    k,v=receive(); WR(v.." received\n"); assert(v==1)
-    k,v=receive(); WR(v.." received\n"); assert(v==2)
-    k,v=receive(); WR(v.." received\n"); assert(v==3)
-    k,v=receive(); WR(tostring(v).." received\n"); assert(v==nil)
+    k,v=receive(); WR("chunk ", v.." received (expecting 1)\n"); assert(k and v==1)
+    k,v=receive(); WR("chunk ", v.." received (expecting 2)\n"); assert(k and v==2)
+    k,v=receive(); WR("chunk ", v.." received  (expecting 3)\n"); assert(k and v==3)
+    k,v=receive(); WR("chunk ", tostring(v).." received  (expecting nil from __lanesconvert)\n"); assert(k and v==nil, "table with __lanesconvert==lanes.null should be received as nil, got " .. tostring(v)) -- a table with __lanesconvert was sent
+    k,v=receive(); WR("chunk ", tostring(v).." received (expecting nil)\n"); assert(k and v==nil)
 
-    send(1,2,3);              WR("1,2,3 sent\n")
-    send 'a';                 WR("'a' sent\n")
-    send(nil);                WR("nil sent\n")
-    send { 'a', 'b', 'c', d=10 }; WR("{'a','b','c',d=10} sent\n")
+    send(4,5,6);              WR("chunk ", "4,5,6 sent\n")
+    send 'aaa';               WR("chunk ", "'aaa' sent\n")
+    send(nil);                WR("chunk ", "nil sent\n")
+    send { 'a', 'b', 'c', d=10 }; WR("chunk ","{'a','b','c',d=10} sent\n")
 
-    k,v=receive(); WR(v.." received\n"); assert(v==4)
+    k,v=receive(); WR("chunk ", v.." received\n"); assert(v==4)
 
     local subT1 = { "subT1"}
     local subT2 = { "subT2"}
-    send { subT1, subT2, subT1, subT2}; WR("{ subT1, subT2, subT1, subT2} sent\n")
+    send { subT1, subT2, subT1, subT2}; WR("chunk ", "{ subT1, subT2, subT1, subT2} sent\n")
 
-    WR("Lane ends!\n")
+    WR("chunk ", "Lane ends!\n")
 end
 
 local linda = lanes_linda("communications")
@@ -241,21 +252,41 @@ assert(type(linda) == "userdata" and tostring(linda) == "Linda: communications")
     -- ["->"] master -> slave
     -- ["<-"] slave <- master
 
-local function PEEK() return linda:get("<-") end
-local function SEND(...) linda:send("->", ...) end
+WR "test linda:get/set..."
+linda:set("<->", "x", "y", "z")
+local b,x,y,z = linda:get("<->", 1)
+assert(b == 1 and x == "x" and y == nil and z == nil)
+local b,x,y,z = linda:get("<->", 2)
+assert(b == 2 and x == "x" and y == "y" and z == nil)
+local b,x,y,z = linda:get("<->", 3)
+assert(b == 3 and x == "x" and y == "y" and z == "z")
+local b,x,y,z,w = linda:get("<->", 4)
+assert(b == 3 and x == "x" and y == "y" and z == "z" and w == nil)
+local k, x = linda:receive("<->")
+assert(k == "<->" and x == "x")
+local k,y,z = linda:receive(linda.batched, "<->", 2)
+assert(k == "<->" and y == "y" and z == "z")
+linda:set("<->")
+local b,x,y,z,w = linda:get("<->", 4)
+assert(b == 0 and x == nil and y == nil and z == nil and w == nil)
+WR "ok\n"
+
+local function PEEK(...) return linda:get("<-", ...) end
+local function SEND(...) local _res, _err = linda:send("->", ...) assert(_res == true and _err == nil) end
 local function RECEIVE() local k,v = linda:receive(1, "<-") return v end
 
 local comms_lane = lanes_gen("io", {gc_cb = gc_cb, name = "auto"}, chunk)(linda)     -- prepare & launch
 
-SEND(1);  WR("1 sent\n")
-SEND(2);  WR("2 sent\n")
-SEND(3);  WR("3 sent\n")
-for i=1,100 do
+SEND(1);  WR("main ", "1 sent\n")
+SEND(2);  WR("main ", "2 sent\n")
+SEND(3);  WR("main ", "3 sent\n")
+SEND(setmetatable({"should be ignored"},{__lanesconvert=lanes.null})); WR("main ", "__lanesconvert table sent\n")
+for i=1,40 do
     WR "."
-    lanes.sleep(0.0001)
-    assert(PEEK() == nil)    -- nothing coming in, yet
+    SLEEP(0.0001)
+    assert(PEEK() == 0)    -- nothing coming in, yet
 end
-SEND(nil);  WR("\nnil sent\n")
+SEND(nil);  WR("\nmain ", "nil sent\n")
 
 local a,b,c = RECEIVE(), RECEIVE(), RECEIVE()
 
@@ -263,13 +294,13 @@ print("lane status: " .. comms_lane.status)
 if comms_lane.status == "error" then
     print(comms_lane:join())
 else
-    WR(a..", "..b..", "..c.." received\n")
+    WR("main ", tostring(a)..", "..tostring(b)..", "..tostring(c).." received\n")
 end
 
-assert(a==1 and b==2 and c==3)
+assert(a==4 and b==5 and c==6)
 
-local a = RECEIVE();   WR(a.." received\n")
-assert(a=='a')
+local aaa = RECEIVE(); WR("main ", aaa.." received\n")
+assert(aaa=='aaa')
 
 local null = RECEIVE();   WR(tostring(null).." received\n")
 assert(null==nil)
@@ -277,7 +308,7 @@ assert(null==nil)
 local out_t = RECEIVE();   WR(type(out_t).." received\n")
 assert(tables_match(out_t, {'a','b','c',d=10}))
 
-assert(PEEK() == nil)
+assert(PEEK() == 0)
 SEND(4)
 
 local complex_table = RECEIVE(); WR(type(complex_table).." received\n")
@@ -289,7 +320,7 @@ comms_lane = nil
 collectgarbage()
 -- wait
 WR("waiting 1s")
-lanes.sleep(1)
+SLEEP(1)
 
 -- ##################################################################################################
 -- ##################################################################################################
@@ -298,7 +329,7 @@ lanes.sleep(1)
 PRINT("\n\n", "---=== Stdlib naming ===---", "\n\n")
 
 local function dump_g(_x)
-    set_debug_threadname "dump_g"
+    lane_threadname "dump_g"
     assert(print)
     print("### dumping _G for '" .. _x .. "'")
     for k, v in pairs(_G) do
@@ -308,7 +339,7 @@ local function dump_g(_x)
 end
 
 local function io_os_f(_x)
-    set_debug_threadname "io_os_f"
+    lane_threadname "io_os_f"
     assert(print)
     print("### checking io and os libs existence for '" .. _x .. "'")
     assert(io)
@@ -317,7 +348,7 @@ local function io_os_f(_x)
 end
 
 local function coro_f(_x)
-    set_debug_threadname "coro_f"
+    lane_threadname "coro_f"
     assert(print)
     print("### checking coroutine lib existence for '" .. _x .. "'")
     assert(coroutine)
@@ -332,7 +363,7 @@ local stdlib_naming_tests =
     -- { "coroutine", dump_g},
     -- { "io", dump_g},
     -- { "bit32", dump_g},
-    { "coroutine", coro_f},
+    { "coroutine?", coro_f}, -- in Lua 5.1, the coroutine base library doesn't exist (coroutine table is created when 'base' is opened)
     { "*", io_os_f},
     { "io,os", io_os_f},
     { "io+os", io_os_f},
@@ -357,7 +388,7 @@ PRINT("\n\n", "---=== Comms criss cross ===---", "\n\n")
 --
 local tc= lanes_gen("io", {gc_cb = gc_cb},
   function(linda, ch_in, ch_out)
-        set_debug_threadname("criss cross " .. ch_in .. " -> " .. ch_out)
+        lane_threadname("criss cross " .. ch_in .. " -> " .. ch_out)
     local function STAGE(str)
         io.stderr:write(ch_in..": "..str.."\n")
         linda:send(nil, ch_out, str)
@@ -394,31 +425,34 @@ local function chunk2(linda)
     --
     local info= debug.getinfo(1)    -- 1 = us
     --
+    PRINT("linda named-> '" ..tostring(linda).."'")
+    PRINT "debug.getinfo->"
     for k,v in pairs(info) do PRINT(k,v) end
 
-    assert(info.nups == (_VERSION == "Lua 5.1" and 2 or 3))    -- one upvalue + PRINT + _ENV (Lua 5.2 only)
-    assert(info.what == "Lua")
+    -- some assertions are adjusted depending on config.strip_functions, because it changes what we get out of debug.getinfo
+    assert(info.nups == (_VERSION == "Lua 5.1" and 4 or 5), "bad nups " .. info.nups)    -- upvalue + config + PRINT + tostring + _ENV (Lua > 5.2 only)
+    assert(info.what == "Lua", "bad what")
     --assert(info.name == "chunk2")   -- name does not seem to come through
-    assert(string.match(info.source, "^@.*basic.lua$"))
-    assert(string.match(info.short_src, "^.*basic.lua$"))
+    assert(config.strip_functions and info.source=="=?" or string.match(info.source, "^@.*basic.lua$"), "bad info.source")
+    assert(config.strip_functions and info.short_src=="?" or string.match(info.short_src, "^.*basic.lua$"), "bad info.short_src")
     -- These vary so let's not be picky (they're there..)
     --
-    assert(info.linedefined > 200)   -- start of 'chunk2'
-    assert(info.currentline > info.linedefined)   -- line of 'debug.getinfo'
-    assert(info.lastlinedefined > info.currentline)   -- end of 'chunk2'
+    assert(info.linedefined == 422, "bad linedefined")   -- start of 'chunk2'
+    assert(config.strip_functions and info.currentline==-1 or info.currentline > info.linedefined, "bad currentline")   -- line of 'debug.getinfo'
+    assert(info.lastlinedefined > info.currentline, "bad lastlinedefined")   -- end of 'chunk2'
     local k,func= linda:receive("down")
-    assert(type(func)=="function")
+    assert(type(func)=="function", "not a function")
     assert(k=="down")
 
     func(linda)
 
     local k,str= linda:receive("down")
-    assert(str=="ok")
+    assert(str=="ok", "bad receive result")
 
     linda:send("up", function() return ":)" end, "ok2")
 end
 
-local linda= lanes.linda("linda")
+local linda = lanes_linda("auto")
 local t2= lanes_gen("debug,string,io", {gc_cb = gc_cb}, chunk2)(linda)     -- prepare & launch
 linda:send("down", function(linda) linda:send("up", "ready!") end,
                     "ok")
@@ -454,7 +488,7 @@ PRINT("\n\n", "---=== :join test ===---", "\n\n")
 
 local S= lanes_gen("table", {gc_cb = gc_cb},
   function(arg)
-        set_debug_threadname "join test lane"
+        lane_threadname "join test lane"
         set_finalizer(function() end)
     aux= {}
     for i, v in ipairs(arg) do
@@ -466,13 +500,13 @@ end)
 
 h= S { 12, 13, 14 }     -- execution starts, h[1..3] will get the return values
 -- wait a bit so that the lane has a chance to set its debug name
-lanes.sleep(0.5)
-print("joining with '" .. h:get_debug_threadname() .. "'")
+SLEEP(0.5)
+print("joining with '" .. h:get_threadname() .. "'")
 local a,b,c,d= h:join()
 if h.status == "error" then
-    print(h:get_debug_threadname(), "error: " , a, b, c, d)
+    print(h:get_threadname(), "error: " , a, b, c, d)
 else
-    print(h:get_debug_threadname(), a,b,c,d)
+    print(h:get_threadname(), a,b,c,d)
     assert(a==14)
     assert(b==13)
     assert(c==12)
@@ -481,6 +515,6 @@ end
 
 local nameof_type, nameof_name = lanes.nameof(print)
 PRINT("name of " .. nameof_type .. " print = '" .. nameof_name .. "'")
-
---
-io.stderr:write "Done! :)\n"
+-- install a finalizer that gets called upon Lanes's internal Universe is GCed.
+-- that way, we print our message after anything that can be output by lanes that are still running at that point
+lanes.finally(function() io.stderr:write "\n=======================================\nTEST OK\n" end)

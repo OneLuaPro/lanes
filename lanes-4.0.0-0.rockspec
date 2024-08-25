@@ -60,16 +60,21 @@ build = {
 		{
 			sources =
 			{
+				"src/_pch.cpp",
 				"src/cancel.cpp",
 				"src/compat.cpp",
 				"src/deep.cpp",
+				"src/intercopycontext.cpp",
 				"src/keeper.cpp",
+				"src/lane.cpp",
 				"src/lanes.cpp",
 				"src/linda.cpp",
 				"src/lindafactory.cpp",
+				"src/nameof.cpp",
 				"src/tools.cpp",
 				"src/state.cpp",
 				"src/threading.cpp",
+				"src/tracker.cpp",
 				"src/universe.cpp"
 			},
 			incdirs = { "src"},

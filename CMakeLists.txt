@@ -29,7 +29,7 @@ endif()
 set(CMAKE_INSTALL_PREFIX ${LIBLUA_INSTALLDIR})
 # ------------------------------------------------------------------------------
 
-CMAKE_MINIMUM_REQUIRED(VERSION 3.28)
+CMAKE_MINIMUM_REQUIRED(VERSION 3.23)
 PROJECT(lanes CXX)
 
 # FIND_PACKAGE(Lua51 REQUIRED)

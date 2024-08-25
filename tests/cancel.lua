@@ -9,9 +9,25 @@ end
 
 local lanes = require "lanes" .configure{ with_timers = false}
 
+local SLEEP = function(...)
+	-- just for fun: start a lane that will do the sleeping for us
+	local sleeperBody = function(...)
+		local lanes = require "lanes"
+		local k, v = lanes.sleep(...)
+		assert(k == nil and v == "timeout")
+		return true
+	end
+	local sleeper = lanes.gen("*", sleeperBody)(...)
+	-- then wait for the lane to terminate
+	sleeper:join()
+end
+
 local linda = lanes.linda()
 -- a numeric value to read
 linda:set( "val", 33.0)
+
+-- so that we can easily swap between lanes.gen and lanes.coro, to try stuff
+local generator = lanes.coro
 
 -- ##################################################################################################
 
@@ -25,7 +41,8 @@ if not next(which_tests) or which_tests.genlock then
 
 	-- check that cancelled lindas give cancel_error as they should
 	linda:cancel()
-	assert( linda:get( "empty") == lanes.cancel_error)
+	local _status, _err = linda:get( "empty")
+	assert(_status == nil and _err == lanes.cancel_error)
 	assert( lanes.genlock( linda, "any", 1) == lanes.cancel_error)
 	assert( lanes.genatomic( linda, "any") == lanes.cancel_error)
 
@@ -35,11 +52,11 @@ if not next(which_tests) or which_tests.genlock then
 	assert( atomic( 1) == lanes.cancel_error)
 
 	-- reset the linda so that the other tests work
-	linda:cancel( "none")
-	linda:limit( "lock", -1)
-	linda:set( "lock")
-	linda:limit( "atomic", -1)
-	linda:set( "atomic")
+	linda:cancel("none")
+	linda:limit("lock", "unlimited")
+	linda:set("lock")
+	linda:limit("atomic", "unlimited")
+	linda:set("atomic")
 
 	print "test OK"
 end
@@ -51,17 +68,17 @@ local waitCancellation = function( h, expected_status)
 	if expected_status ~= "running" then
 		repeat
 			-- print( "lane status:", h.status)
-			l:receive( 0.1, "yeah") -- wait a bit
+			SLEEP(0.1) -- wait a bit
 		until h.status ~= "running"
 	end
 	print( "lane status:", h.status)
-	assert( h.status == expected_status, h.status .. " ~= " .. expected_status)
+	assert( h.status == expected_status, "lane status " .. h.status .. " (actual) ~= " .. expected_status .. " (expected)")
 	print "test OK"
 end
 
 local laneBody = function( mode_, payload_)
 	local name = "laneBody("..tostring(mode_)..","..tostring(payload_)..")"
-	set_debug_threadname( name)
+	lane_threadname(name)
 
 	set_finalizer( function( err, stk)
 		if err == lanes.cancel_error then
@@ -80,8 +97,8 @@ local laneBody = function( mode_, payload_)
 			-- linda mode
 			io.stdout:write( "			lane calling receive() ... ")
 			local key, val = linda:receive( payload_, "boob")
-			print( lanes.cancel_error == key and "cancel_error" or tostring( key), tostring( val))
-			if key == lanes.cancel_error then
+			print(tostring(key), val == lanes.cancel_error and "cancel_error" or tostring(val))
+			if val == lanes.cancel_error then
 				break -- gracefully abort loop
 			end
 		elseif mode_ == "get" then
@@ -89,14 +106,14 @@ local laneBody = function( mode_, payload_)
 			io.stdout:write( "			lane busy waiting ... ")
 			for i = 1, payload_ do
 				-- force a non-jitable call
-				local a = linda:get( "val")
+				local _, a = linda:get( "val")
 				a = a * 2
 			end
 			print( "again?")
 		elseif mode_ == "busy" then
 			-- busy wait mode in pure Lua code
 			io.stdout:write( "			lane busy waiting ... ")
-			local a =  linda:get( "val")
+			local _, a = linda:get( "val")
 			for i = 1, payload_ do
 				a = a * 2
 				a = math.sin( a) * math.sin( a) + math.cos( a) * math.cos( a) -- aka 1
@@ -135,12 +152,12 @@ end
 if not next(which_tests) or which_tests.linda then
 	remaining_tests.linda = nil
 	print "\n\n####################################################################\nbegin linda cancel test\n"
-	h = lanes.gen( "*", laneBody)( "receive", nil) -- start an infinite wait on the linda
+	h = generator( "*", laneBody)( "receive", nil) -- start an infinite wait on the linda
 
 	print "wait 1s"
-	linda:receive( 1, "yeah")
+	SLEEP(1)
 
-	-- linda cancel: linda:receive() returns cancel_error immediately
+	-- linda cancel: linda:receive() returns nil,cancel_error immediately
 	print "cancelling"
 	linda:cancel( "both")
 
@@ -156,10 +173,10 @@ end
 if not next(which_tests) or which_tests.soft then
 	remaining_tests.soft = nil
 	print "\n\n####################################################################\nbegin soft cancel test\n"
-	h = lanes.gen( "*", protectedBody)( "receive") -- start an infinite wait on the linda
+	h = generator( "*", protectedBody)( "receive") -- start an infinite wait on the linda
 
 	print "wait 1s"
-	linda:receive( 1, "yeah")
+	SLEEP(1)
 
 	-- soft cancel, no awakening of waiting linda operations, should timeout
 	local a, b = h:cancel( "soft", 1, false)
@@ -180,9 +197,9 @@ end
 if not next(which_tests) or which_tests.hook then
 	remaining_tests.hook = nil
 	print "\n\n####################################################################\nbegin hook cancel test\n"
-	h = lanes.gen( "*", protectedBody)( "get", 300000)
+	h = generator( "*", protectedBody)( "get", 300000)
 	print "wait 2s"
-	linda:receive( 2, "yeah")
+	SLEEP(2)
 
 	-- count hook cancel after some instruction instructions
 	print "cancelling"
@@ -201,7 +218,7 @@ if not next(which_tests) or which_tests.hard then
 
 	-- wait 2s before cancelling the lane
 	print "wait 2s"
-	linda:receive( 2, "yeah")
+	SLEEP(2)
 
 	-- hard cancel: the lane will be interrupted from inside its current linda:receive() and won't return from it
 	print "cancelling"
@@ -216,11 +233,11 @@ end
 if not next(which_tests) or which_tests.hard_unprotected then
 	remaining_tests.hard_unprotected = nil
 	print "\n\n####################################################################\nbegin hard cancel test with unprotected lane body\n"
-	h = lanes.gen( "*", laneBody)( "receive", nil)
+	h = generator( "*", laneBody)( "receive", nil)
 
 	-- wait 2s before cancelling the lane
 	print "wait 2s"
-	linda:receive( 2, "yeah")
+	SLEEP(2)
 
 	-- hard cancel: the lane will be interrupted from inside its current linda:receive() and won't return from it
 	print "cancelling"

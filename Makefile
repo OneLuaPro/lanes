@@ -80,6 +80,7 @@ test:
 	$(MAKE) cyclic
 	$(MAKE) deadlock
 	$(MAKE) errhangtest
+	$(MAKE) error
 	$(MAKE) fibonacci
 	$(MAKE) fifo
 	$(MAKE) finalizer
@@ -89,10 +90,12 @@ test:
 	$(MAKE) keeper
 	$(MAKE) linda_perf
 	$(MAKE) manual_register
+	$(MAKE) nameof
 	$(MAKE) objects
 	$(MAKE) package
 	$(MAKE) pingpong
 	$(MAKE) recursive
+	$(MAKE) require
 	$(MAKE) rupval
 	$(MAKE) timer
 	$(MAKE) track_lanes
@@ -124,7 +127,7 @@ ehynes: tests/ehynes.lua $(_TARGET_SO)
 errhangtest: tests/errhangtest.lua $(_TARGET_SO)
 	$(_PREFIX) $(LUA) $<
 
-error-test: tests/error.lua $(_TARGET_SO)
+error: tests/error.lua $(_TARGET_SO)
 	$(_PREFIX) $(LUA) $<
 
 fibonacci: tests/fibonacci.lua $(_TARGET_SO)
@@ -160,6 +163,9 @@ linda_perf: tests/linda_perf.lua $(_TARGET_SO)
 manual_register: tests/manual_register.lua $(_TARGET_SO)
 	$(_PREFIX) $(LUA) $<
 
+nameof: tests/nameof.lua $(_TARGET_SO)
+	$(_PREFIX) $(LUA) $<
+
 objects: tests/objects.lua $(_TARGET_SO)
 	$(_PREFIX) $(LUA) $<
 
@@ -184,6 +190,9 @@ pingpong: tests/pingpong.lua $(_TARGET_SO)
 recursive: tests/recursive.lua $(_TARGET_SO)
 	$(_PREFIX) $(LUA) $<
 
+require: tests/require.lua $(_TARGET_SO)
+	$(_PREFIX) $(LUA) $<
+
 rupval: tests/rupval.lua $(_TARGET_SO)
 	$(_PREFIX) $(LUA) $<
 
@@ -203,15 +212,6 @@ repetitive: $(_TARGET_SO)
 
 repetitive1: $(_TARGET_SO)
 	$(_PREFIX) $(LUA) $(REP_ARGS)
-
-#require: tests/require.lua $(_TARGET_SO)
-#	$(_PREFIX) $(LUA) $<
-
-rupval: tests/rupval.lua $(_TARGET_SO)
-	$(_PREFIX) $(LUA) $<
-
-timer: tests/timer.lua $(_TARGET_SO)
-	$(_PREFIX) $(LUA) $<
 
 #---
 #---

@@ -5,29 +5,13 @@
  * said modules can either link against lanes, or embed compat.cpp/h deep.cpp/h tools.cpp/h universe.cpp/h
  */
 
-#ifdef __cplusplus
-extern "C"
-{
-#endif // __cplusplus
-#include "lua.h"
-#ifdef __cplusplus
-}
-#endif // __cplusplus
-
 #include "lanesconf.h"
 #include "uniquekey.h"
 
-#include <atomic>
-
 // forwards
+enum class LookupMode;
+class DeepFactory;
 class Universe;
-
-enum class LookupMode
-{
-    LaneBody, // send the lane body directly from the source to the destination lane. keep this one first so that it's the value we get when we default-construct
-    ToKeeper, // send a function from a lane to a keeper state
-    FromKeeper // send a function from a keeper state to a lane
-};
 
 // #################################################################################################
 
@@ -40,7 +24,7 @@ struct DeepPrelude
 {
     UniqueKey const magic{ kDeepVersion };
     // when stored in a keeper state, the full userdata doesn't have a metatable, so we need direct access to the factory
-    class DeepFactory& factory;
+    DeepFactory& factory;
     // data is destroyed when refcount is 0
     std::atomic<int> refcount{ 0 };
 
@@ -48,7 +32,11 @@ struct DeepPrelude
     : factory{ factory_ }
     {
     }
+
+    void push(lua_State* L_) const;
 };
+
+// #################################################################################################
 
 // external C modules should create a single object implementing that interface for each Deep userdata class they want to expose
 class DeepFactory
@@ -66,17 +54,23 @@ class DeepFactory
     DeepFactory& operator=(DeepFactory const&&) = delete;
 
     private:
-    void storeDeepLookup(lua_State* L_) const;
     // NVI: private overrides
-    [[nodiscard]] virtual DeepPrelude* newDeepObjectInternal(lua_State* L_) const = 0;
-    virtual void deleteDeepObjectInternal(lua_State* L_, DeepPrelude* o_) const = 0;
     virtual void createMetatable(lua_State* L_) const = 0;
-    [[nodiscard]] virtual char const* moduleName() const = 0;
+    virtual void deleteDeepObjectInternal(lua_State* L_, DeepPrelude* o_) const = 0;
+    [[nodiscard]] virtual DeepPrelude* newDeepObjectInternal(lua_State* L_) const = 0;
+    [[nodiscard]] virtual std::string_view moduleName() const = 0;
+
+    private:
+    void storeDeepLookup(lua_State* L_) const;
 
     public:
     // NVI: public interface
-    [[nodiscard]] int pushDeepUserdata(DestState L_, int nuv_) const;
-    [[nodiscard]] DeepPrelude* toDeep(lua_State* L_, int index_) const;
     static void DeleteDeepObject(lua_State* L_, DeepPrelude* o_);
-    [[nodiscard]] static char const* PushDeepProxy(DestState L_, DeepPrelude* o_, int nuv_, LookupMode mode_);
+    [[nodiscard]] static bool IsDeepUserdata(lua_State* const L_, int const idx_);
+    [[nodiscard]] static DeepFactory* LookupFactory(lua_State* L_, int index_, LookupMode mode_);
+    static void PushDeepProxy(DestState L_, DeepPrelude* o_, int nuv_, LookupMode mode_, lua_State* errL_);
+    void pushDeepUserdata(DestState L_, int nuv_) const;
+    [[nodiscard]] DeepPrelude* toDeep(lua_State* L_, int index_) const;
 };
+
+// #################################################################################################

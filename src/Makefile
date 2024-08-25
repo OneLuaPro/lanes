@@ -7,9 +7,9 @@
 
 MODULE=lanes
 
-SRC=lanes.c cancel.cpp compat.cpp threading.cpp tools.cpp state.cpp linda.cpp lindafactory.cpp deep.cpp keeper.cpp universe.cpp
+SRC=_pch.cpp cancel.cpp compat.cpp deep.cpp intercopycontext.cpp keeper.cpp lane.cpp lanes.cpp linda.cpp lindafactory.cpp nameof.cpp state.cpp threading.cpp tools.cpp tracker.cpp universe.cpp
 
-OBJ=$(SRC:.c=.o)
+OBJ=$(SRC:.cpp=.o)
 
 # LuaRocks gives 'LIBFLAG' from the outside
 #
@@ -151,10 +151,10 @@ MINGW_GCC=mingw32-gcc
 
 win32: $(WIN32_LUA51)/include/lua.h
 	$(MAKE) build CC=$(MINGW_GCC) \
-            LUA_FLAGS=-I$(WIN32_LUA51)/include \
-            LUA_LIBS="-L$(WIN32_LUA51) -llua51" \
-            _SO=dll \
-            SO_FLAGS=-shared
+		LUA_FLAGS=-I$(WIN32_LUA51)/include \
+		LUA_LIBS="-L$(WIN32_LUA51) -llua51" \
+		_SO=dll \
+		SO_FLAGS=-shared
 
 $(WIN32_LUA51)/include/lua.h:
 	@echo "Usage: make win32 WIN32_LUA51=<path of extracted LuaBinaries dll8 and dev packages>"

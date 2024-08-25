@@ -1,4 +1,8 @@
-local lanes = require "lanes".configure{with_timers=false}
+local lanes = require "lanes".configure{with_timers=false,strip_functions=false}
+
+local require_assert_result_1, require_assert_result_2 = require "assert"    -- assert.fails()
+print("require_assert_result:", require_assert_result_1, require_assert_result_2)
+
 local linda = lanes.linda()
 
 -- we are not allowed to send coroutines through a lane
@@ -7,7 +11,8 @@ if true then
 	print "#### coro set"
 	local coro = coroutine.create(function() end)
 	print(pcall(linda.set, linda, 'test', coro))
-	assert(linda:get("test") == nil)
+	local _count, _val = linda:get("test")
+	assert(_count == 0 and _val == nil)
 	print "OK"
 end
 
@@ -15,17 +20,24 @@ if true then
 	print "\n#### reserved sentinels"
 	print(pcall(linda.set, linda, lanes.cancel_error))
 	print(pcall(linda.set, linda, linda.batched))
-	assert(linda:get("test") == nil)
+	local _count, _val = linda:get("test")
+	assert(_count == 0 and _val == nil)
 	print "OK"
 end
 
 -- get/set a few values
 if true then
 	print "\n#### set 3 -> receive batched"
+	assert.fails(function() linda:receive(linda.batched, "some key", -1, 1) end)
+	assert.fails(function() linda:receive(linda.batched, "some key", 2, 1) end)
+	assert.failsnot(function() linda:receive(0, linda.batched, "some key", 1, 3) end)
 	local fun = function() print "function test ok" end
 	print(pcall(linda.set, linda, 'test', true, nil, fun))
-	local k,b,n,f = linda:receive(linda.batched, 'test', 3) -- read back the contents
-	assert(linda:get("test") == nil)
+	-- read back the contents
+	local k,b,n,f = linda:receive(linda.batched, 'test', 3)
+	local _count, _val = linda:get("test")
+	assert(_count == 0 and _val == nil)
+	-- check they are ok
 	print(k, b, n)
 	f()
 	print "OK"
@@ -39,7 +51,10 @@ if true then
 	print(pcall(linda.send, linda, 'test', t_in))
 	local k,t_out = linda:receive('test') -- read the contents successfully sent
 	t_out.fun()
-	-- TODO: t_out should contain a single entry, as [fun] = fun should have been discarded because functions are not acceptable keys
+	-- t_out should contain a single entry, as [fun] = fun should have been discarded because functions are not acceptable keys
+	local count = 0
+	for k,v in pairs(t_out) do count = count + 1 end
+	assert(count == 1)
 	print "OK"
 end
 
@@ -58,7 +73,8 @@ if true then
 	print "\n#### coro send"
 	local coro = coroutine.create(function() end)
 	print(pcall(linda.send, linda, 'test', coro))
-	assert(linda:get("test") == nil)
+	local _count, _val = linda:get("test")
+	assert(_count == 0 and _val == nil)
 	print "OK"
 end
 

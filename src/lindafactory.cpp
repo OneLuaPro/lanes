@@ -30,13 +30,12 @@ THE SOFTWARE.
 ===============================================================================
 */
 
+#include "_pch.h"
 #include "lindafactory.h"
 
-#include "lanes_private.h"
 #include "linda.h"
 
-// must be a #define instead of a constexpr to work with lua_pushliteral (until I templatize it)
-#define kLindaMetatableName "Linda"
+static constexpr std::string_view kLindaMetatableName{ "Linda" };
 
 // #################################################################################################
 
@@ -49,7 +48,7 @@ void LindaFactory::createMetatable(lua_State* L_) const
     lua_setfield(L_, -2, "__index");
 
     // protect metatable from external access
-    lua_pushliteral(L_, kLindaMetatableName);
+    luaG_pushstring(L_, kLindaMetatableName);
     lua_setfield(L_, -2, "__metatable");
 
     // the linda functions
@@ -69,66 +68,63 @@ void LindaFactory::createMetatable(lua_State* L_) const
 
 void LindaFactory::deleteDeepObjectInternal(lua_State* L_, DeepPrelude* o_) const
 {
-    Linda* const linda{ static_cast<Linda*>(o_) };
-    LUA_ASSERT(L_, linda);
-    Keeper* const myK{ linda->whichKeeper() };
+    Linda* const _linda{ static_cast<Linda*>(o_) };
+    LUA_ASSERT(L_, _linda && !_linda->inKeeperOperation());
+    Keeper* const _myKeeper{ _linda->whichKeeper() };
     // if collected after the universe, keepers are already destroyed, and there is nothing to clear
-    if (myK) {
+    if (_myKeeper) {
         // if collected from my own keeper, we can't acquire/release it
         // because we are already inside a protected area, and trying to do so would deadlock!
-        bool const need_acquire_release{ myK->L != L_ };
+        bool const _need_acquire_release{ _myKeeper->K != L_ };
         // Clean associated structures in the keeper state.
-        Keeper* const K{ need_acquire_release ? linda->acquireKeeper() : myK };
+        Keeper* const _keeper{ _need_acquire_release ? _linda->acquireKeeper() : _myKeeper };
+        LUA_ASSERT(L_, _keeper == _myKeeper); // should always be the same
         // hopefully this won't ever raise an error as we would jump to the closest pcall site while forgetting to release the keeper mutex...
-        [[maybe_unused]] KeeperCallResult const result{ keeper_call(linda->U, K->L, KEEPER_API(clear), L_, linda, 0) };
+        [[maybe_unused]] KeeperCallResult const result{ keeper_call(_keeper->K, KEEPER_API(destruct), L_, _linda, 0) };
         LUA_ASSERT(L_, result.has_value() && result.value() == 0);
-        if (need_acquire_release) {
-            linda->releaseKeeper(K);
+        if (_need_acquire_release) {
+            _linda->releaseKeeper(_keeper);
         }
     }
 
-    delete linda; // operator delete overload ensures things go as expected
+    delete _linda; // operator delete overload ensures things go as expected
 }
 
 // #################################################################################################
 
-char const* LindaFactory::moduleName() const
+std::string_view LindaFactory::moduleName() const
 {
     // linda is a special case because we know lanes must be loaded from the main lua state
     // to be able to ever get here, so we know it will remain loaded as long a the main state is around
     // in other words, forever.
-    return nullptr;
+    return std::string_view{};
 }
 
 // #################################################################################################
 
-DeepPrelude* LindaFactory::newDeepObjectInternal(lua_State* L_) const
+DeepPrelude* LindaFactory::newDeepObjectInternal(lua_State* const L_) const
 {
-    size_t name_len{ 0 };
-    char const* linda_name{ nullptr };
-    LindaGroup linda_group{ 0 };
-    // should have a string and/or a number of the stack as parameters (name and group)
-    switch (lua_gettop(L_)) {
-    default: // 0
-        break;
+    // we always expect name and group at the bottom of the stack (either can be nil). any extra stuff we ignore and keep unmodified
+    std::string_view _linda_name{ luaG_tostring(L_, 1) };
+    LindaGroup _linda_group{ static_cast<int>(lua_tointeger(L_, 2)) };
 
-    case 1: // 1 parameter, either a name or a group
-        if (lua_type(L_, -1) == LUA_TSTRING) {
-            linda_name = lua_tolstring(L_, -1, &name_len);
+    // store in the linda the location of the script that created it
+    if (_linda_name == "auto") {
+        lua_Debug _ar;
+        if (lua_getstack(L_, 1, &_ar) == 1) { // 1 because we want the name of the function that called lanes.linda (where we currently are)
+            lua_getinfo(L_, "Sln", &_ar);
+            _linda_name = luaG_pushstring(L_, "%s:%d", _ar.short_src, _ar.currentline);
         } else {
-            linda_group = LindaGroup{ static_cast<int>(lua_tointeger(L_, -1)) };
+            _linda_name = luaG_pushstring(L_, "<unresolved>");
         }
-        break;
-
-    case 2: // 2 parameters, a name and group, in that order
-        linda_name = lua_tolstring(L_, -2, &name_len);
-        linda_group = LindaGroup{ static_cast<int>(lua_tointeger(L_, -1)) };
-        break;
+        // since the name is not empty, it is at slot 1, and we can replace "auto" with the result, just in case
+        LUA_ASSERT(L_, luaG_tostring(L_, 1) == "auto");
+        lua_replace(L_, 1);
     }
 
     // The deep data is allocated separately of Lua stack; we might no longer be around when last reference to it is being released.
     // One can use any memory allocation scheme. Just don't use L's allocF because we don't know which state will get the honor of GCing the linda
-    Universe* const U{ universe_get(L_) };
-    Linda* const linda{ new (U) Linda{ U, linda_group, linda_name, name_len } };
-    return linda;
+    Universe* const _U{ Universe::Get(L_) };
+    Linda* const _linda{ new (_U) Linda{ _U, _linda_group, _linda_name } };
+    return _linda;
 }

@@ -32,12 +32,11 @@ THE SOFTWARE.
 ===============================================================================
 ]]--
 */
-
+#include "_pch.h"
 #include "cancel.h"
 
-#include "lanes_private.h"
-#include "threading.h"
-#include "tools.h"
+#include "debugspew.h"
+#include "lane.h"
 
 // #################################################################################################
 // #################################################################################################
@@ -51,38 +50,11 @@ THE SOFTWARE.
  * Returns CANCEL_SOFT/HARD if any locks are to be exited, and 'raise_cancel_error()' called,
  * to make execution of the lane end.
  */
-[[nodiscard]] static inline CancelRequest cancel_test(lua_State* L_)
+[[nodiscard]] CancelRequest CheckCancelRequest(lua_State* const L_)
 {
-    Lane* const lane{ kLanePointerRegKey.readLightUserDataValue<Lane>(L_) };
+    Lane* const _lane{ kLanePointerRegKey.readLightUserDataValue<Lane>(L_) };
     // 'lane' is nullptr for the original main state (and no-one can cancel that)
-    return lane ? lane->cancelRequest : CancelRequest::None;
-}
-
-// #################################################################################################
-
-//---
-// bool = cancel_test()
-//
-// Available inside the global namespace of lanes
-// returns a boolean saying if a cancel request is pending
-//
-LUAG_FUNC(cancel_test)
-{
-    CancelRequest test{ cancel_test(L_) };
-    lua_pushboolean(L_, test != CancelRequest::None);
-    return 1;
-}
-
-// #################################################################################################
-// #################################################################################################
-
-[[nodiscard]] static void cancel_hook(lua_State* L_, [[maybe_unused]] lua_Debug* ar_)
-{
-    DEBUGSPEW_CODE(fprintf(stderr, "cancel_hook\n"));
-    if (cancel_test(L_) != CancelRequest::None) {
-        lua_sethook(L_, nullptr, 0, 0);
-        raise_cancel_error(L_);
-    }
+    return _lane ? _lane->cancelRequest : CancelRequest::None;
 }
 
 // #################################################################################################
@@ -106,96 +78,62 @@ LUAG_FUNC(cancel_test)
 //
 
 // #################################################################################################
+// #################################################################################################
 
-[[nodiscard]] static CancelResult thread_cancel_soft(Lane* lane_, std::chrono::time_point<std::chrono::steady_clock> until_, bool wakeLane_)
+CancelOp WhichCancelOp(std::string_view const& opString_)
 {
-    lane_->cancelRequest = CancelRequest::Soft; // it's now signaled to stop
-    // negative timeout: we don't want to truly abort the lane, we just want it to react to cancel_test() on its own
-    if (wakeLane_) { // wake the thread so that execution returns from any pending linda operation if desired
-        std::condition_variable* const waiting_on{ lane_->waiting_on };
-        if (lane_->status == Lane::Waiting && waiting_on != nullptr) {
-            waiting_on->notify_all();
-        }
+    CancelOp _op{ CancelOp::Invalid };
+    if (opString_ == "hard") {
+        _op = CancelOp::Hard;
+    } else if (opString_ == "soft") {
+        _op = CancelOp::Soft;
+    } else if (opString_== "call") {
+        _op = CancelOp::MaskCall;
+    } else if (opString_ == "ret") {
+        _op = CancelOp::MaskRet;
+    } else if (opString_ == "line") {
+        _op = CancelOp::MaskLine;
+    } else if (opString_ == "count") {
+        _op = CancelOp::MaskCount;
+    } else if (opString_ == "all") {
+        _op = CancelOp::MaskAll;
     }
-
-    return lane_->waitForCompletion(until_) ? CancelResult::Cancelled : CancelResult::Timeout;
+    return _op;
 }
 
 // #################################################################################################
 
-[[nodiscard]] static CancelResult thread_cancel_hard(Lane* lane_, std::chrono::time_point<std::chrono::steady_clock> until_, bool wakeLane_)
+[[nodiscard]] static CancelOp WhichCancelOp(lua_State* const L_, int const idx_)
 {
-    lane_->cancelRequest = CancelRequest::Hard; // it's now signaled to stop
-    // lane_->thread.get_stop_source().request_stop();
-    if (wakeLane_) { // wake the thread so that execution returns from any pending linda operation if desired
-        std::condition_variable* waiting_on = lane_->waiting_on;
-        if (lane_->status == Lane::Waiting && waiting_on != nullptr) {
-            waiting_on->notify_all();
-        }
-    }
-
-    CancelResult result{ lane_->waitForCompletion(until_) ? CancelResult::Cancelled : CancelResult::Timeout };
-    return result;
-}
-
-// #################################################################################################
-
-CancelResult thread_cancel(Lane* lane_, CancelOp op_, int hookCount_, std::chrono::time_point<std::chrono::steady_clock> until_, bool wakeLane_)
-{
-    // remember that lanes are not transferable: only one thread can cancel a lane, so no multithreading issue here
-    // We can read 'lane_->status' without locks, but not wait for it (if Posix no PTHREAD_TIMEDJOIN)
-    if (lane_->status >= Lane::Done) {
-        // say "ok" by default, including when lane is already done
-        return CancelResult::Cancelled;
-    }
-
-    // signal the linda the wake up the thread so that it can react to the cancel query
-    // let us hope we never land here with a pointer on a linda that has been destroyed...
-    if (op_ == CancelOp::Soft) {
-        return thread_cancel_soft(lane_, until_, wakeLane_);
-    } else if (static_cast<int>(op_) > static_cast<int>(CancelOp::Soft)) {
-        lua_sethook(lane_->L, cancel_hook, static_cast<int>(op_), hookCount_);
-    }
-
-    return thread_cancel_hard(lane_, until_, wakeLane_);
-}
-
-// #################################################################################################
-// #################################################################################################
-
-CancelOp which_cancel_op(char const* opString_)
-{
-    CancelOp op{ CancelOp::Invalid };
-    if (strcmp(opString_, "hard") == 0) {
-        op = CancelOp::Hard;
-    } else if (strcmp(opString_, "soft") == 0) {
-        op = CancelOp::Soft;
-    } else if (strcmp(opString_, "call") == 0) {
-        op = CancelOp::MaskCall;
-    } else if (strcmp(opString_, "ret") == 0) {
-        op = CancelOp::MaskRet;
-    } else if (strcmp(opString_, "line") == 0) {
-        op = CancelOp::MaskLine;
-    } else if (strcmp(opString_, "count") == 0) {
-        op = CancelOp::MaskCount;
-    }
-    return op;
-}
-
-// #################################################################################################
-
-[[nodiscard]] static CancelOp which_cancel_op(lua_State* L_, int idx_)
-{
-    if (lua_type(L_, idx_) == LUA_TSTRING) {
-        char const* const str{ lua_tostring(L_, idx_) };
-        CancelOp op{ which_cancel_op(str) };
+    if (luaG_type(L_, idx_) == LuaType::STRING) {
+        std::string_view const _str{ luaG_tostring(L_, idx_) };
+        CancelOp _op{ WhichCancelOp(_str) };
         lua_remove(L_, idx_); // argument is processed, remove it
-        if (op == CancelOp::Invalid) {
-            raise_luaL_error(L_, "invalid hook option %s", str);
+        if (_op == CancelOp::Invalid) {
+            raise_luaL_error(L_, "invalid hook option %s", _str);
         }
-        return op;
+        return _op;
     }
     return CancelOp::Hard;
+}
+
+// #################################################################################################
+// #################################################################################################
+// ######################################### Lua API ###############################################
+// #################################################################################################
+// #################################################################################################
+
+//---
+// bool = cancel_test()
+//
+// Available inside the global namespace of a lane
+// returns a boolean saying if a cancel request is pending
+//
+LUAG_FUNC(cancel_test)
+{
+    CancelRequest _test{ CheckCancelRequest(L_) };
+    lua_pushboolean(L_, _test != CancelRequest::None);
+    return 1;
 }
 
 // #################################################################################################
@@ -203,23 +141,23 @@ CancelOp which_cancel_op(char const* opString_)
 // bool[,reason] = lane_h:cancel( [mode, hookcount] [, timeout] [, wake_lane])
 LUAG_FUNC(thread_cancel)
 {
-    Lane* const lane{ ToLane(L_, 1) };
-    CancelOp const op{ which_cancel_op(L_, 2) }; // this removes the op string from the stack
+    Lane* const _lane{ ToLane(L_, 1) };
+    CancelOp const _op{ WhichCancelOp(L_, 2) }; // this removes the op string from the stack
 
-    int hook_count{ 0 };
-    if (static_cast<int>(op) > static_cast<int>(CancelOp::Soft)) { // hook is requested
-        hook_count = static_cast<int>(luaL_checkinteger(L_, 2));
+    int _hook_count{ 0 };
+    if (static_cast<int>(_op) > static_cast<int>(CancelOp::Soft)) { // hook is requested
+        _hook_count = static_cast<int>(luaL_checkinteger(L_, 2));
         lua_remove(L_, 2); // argument is processed, remove it
-        if (hook_count < 1) {
+        if (_hook_count < 1) {
             raise_luaL_error(L_, "hook count cannot be < 1");
         }
     }
 
-    std::chrono::time_point<std::chrono::steady_clock> until{ std::chrono::time_point<std::chrono::steady_clock>::max() };
-    if (lua_type(L_, 2) == LUA_TNUMBER) { // we don't want to use lua_isnumber() because of autocoercion
+    std::chrono::time_point<std::chrono::steady_clock> _until{ std::chrono::time_point<std::chrono::steady_clock>::max() };
+    if (luaG_type(L_, 2) == LuaType::NUMBER) { // we don't want to use lua_isnumber() because of autocoercion
         lua_Duration const duration{ lua_tonumber(L_, 2) };
         if (duration.count() >= 0.0) {
-            until = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(duration);
+            _until = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(duration);
         } else {
             raise_luaL_argerror(L_, 2, "duration cannot be < 0");
         }
@@ -229,28 +167,28 @@ LUAG_FUNC(thread_cancel)
     }
 
     // we wake by default in "hard" mode (remember that hook is hard too), but this can be turned off if desired
-    bool wake_lane{ op != CancelOp::Soft };
+    bool _wake_lane{ _op != CancelOp::Soft };
     if (lua_gettop(L_) >= 2) {
         if (!lua_isboolean(L_, 2)) {
-            raise_luaL_error(L_, "wake_lindas parameter is not a boolean");
+            raise_luaL_error(L_, "wake_lindas argument is not a boolean");
         }
-        wake_lane = lua_toboolean(L_, 2);
+        _wake_lane = lua_toboolean(L_, 2);
         lua_remove(L_, 2); // argument is processed, remove it
     }
     STACK_CHECK_START_REL(L_, 0);
-    switch (thread_cancel(lane, op, hook_count, until, wake_lane)) {
+    switch (_lane->cancel(_op, _hook_count, _until, _wake_lane)) {
     default: // should never happen unless we added a case and forgot to handle it
-        LUA_ASSERT(L_, false);
+        raise_luaL_error(L_, "should not get here!");
         break;
 
     case CancelResult::Timeout:
-        lua_pushboolean(L_, 0); // false
-        lua_pushstring(L_, "timeout"); // false "timeout"
+        lua_pushboolean(L_, 0);                                                                    // false
+        lua_pushstring(L_, "timeout");                                                             // false "timeout"
         break;
 
     case CancelResult::Cancelled:
-        lua_pushboolean(L_, 1); // true
-        lane->pushThreadStatus(L_); // true status
+        lua_pushboolean(L_, 1);                                                                    // true
+        _lane->pushStatusString(L_);                                                               // true "<status>"
         break;
     }
     STACK_CHECK(L_, 2);

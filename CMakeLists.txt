@@ -26,7 +26,9 @@ endif()
 # ------------------------------------------------------------------------------
 # Installation prefix directory - automatically set from find_package()
 # Needs to be defined before project definition statement - for whatever reason
-set(CMAKE_INSTALL_PREFIX ${LIBLUA_INSTALLDIR})
+if(NOT CMAKE_INSTALL_PREFIX)
+  set(CMAKE_INSTALL_PREFIX ${LIBLUA_INSTALLDIR})
+endif()
 # ------------------------------------------------------------------------------
 
 CMAKE_MINIMUM_REQUIRED(VERSION 3.23)
@@ -96,21 +98,23 @@ set(INSTALL_DOCDIR
   ${CMAKE_INSTALL_DOCDIR} CACHE PATH "Installation directory for documentation")
 set(INSTALL_MANDIR
   ${CMAKE_INSTALL_MANDIR} CACHE PATH "Installation directory for manpages")
+set(INSTALL_DATAROOTDIR
+  ${CMAKE_INSTALL_DATAROOTDIR} CACHE PATH "Installation directory for data")
 # Redefine original install dirs for OneLuaPro
 set(INSTALL_CMOD
   ${INSTALL_LIBDIR}/lua/${liblua_VERSION_MAJOR}.${liblua_VERSION_MINOR}/lanes
   CACHE PATH "Directory to install Lua binary modules.")
 set(INSTALL_LMOD
-  ${LIBLUA_INSTALLDIR}/share/lua/${liblua_VERSION_MAJOR}.${liblua_VERSION_MINOR}
+  ${INSTALL_DATAROOTDIR}/lua/${liblua_VERSION_MAJOR}.${liblua_VERSION_MINOR}
   CACHE PATH "Directory to install Lua modules.")
 set(INSTALL_DATA
-  ${LIBLUA_INSTALLDIR}/share/doc/lanes
+  ${INSTALL_DATAROOTDIR}/doc/lanes
   CACHE PATH "Directory the package can store documentation, tests or other data in.")
 set(INSTALL_DOC
-  ${LIBLUA_INSTALLDIR}/share/doc/lanes/doc
+  ${INSTALL_DATAROOTDIR}/doc/lanes/doc
   CACHE PATH "Recommended directory to install documentation into.")
 set(INSTALL_TEST
-  ${LIBLUA_INSTALLDIR}/share/doc/lanes/test
+  ${INSTALL_DATAROOTDIR}/doc/lanes/test
   CACHE PATH "Recommended directory to install tests into.")
 # ------------------------------------------------------------------------------
 

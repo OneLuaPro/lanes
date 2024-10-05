@@ -70,7 +70,7 @@
 			</p>
 
 			<p>
-				This document was revised on 12-Jun-24, and applies to version <tt>4.0.0</tt>.
+				This document was revised on 24-Sep-24, and applies to version <tt>4.0.0</tt>.
 			</p>
 		</font>
 	</center>
@@ -681,6 +681,8 @@
 
 <p>
 	Any non-<tt>nil</tt> value causes initialization of <tt>"base"</tt> and <tt>"jit"</tt> (the latter only for LuaJIT-based builds).<br />
+	Library names may contain characters matching <tt>std::isalnum(c_) || c_ == '.' || c_ == '-' || c_ == '_'</tt>. Anything else is considered a valid name separator.<br />
+	Trying to load a library not supported by the running Lua flavor will raise an error, unless the library name is postfixed with a <tt>'?'</tt>.<br />
 	Initializing the standard libs takes a bit of time at each lane invocation. This is the main reason why "no libraries" is the default.
 </p>
 

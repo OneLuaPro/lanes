@@ -13,7 +13,7 @@ static constexpr UniqueKey kLindaBatched{ 0xB8234DF772646567ull, "linda.batched"
 
 // #################################################################################################
 
-using LindaGroup = Unique<int>;
+DECLARE_UNIQUE_TYPE(LindaGroup, int);
 
 class Linda
 : public DeepPrelude // Deep userdata MUST start with this header
@@ -52,7 +52,7 @@ class Linda
     std::condition_variable readHappened{};
     std::condition_variable writeHappened{};
     Universe* const U{ nullptr }; // the universe this linda belongs to
-    int const keeperIndex{ -1 }; // the keeper associated to this linda
+    KeeperIndex const keeperIndex{ -1 }; // the keeper associated to this linda
     CancelRequest cancelRequest{ CancelRequest::None };
 
     public:

@@ -71,7 +71,7 @@ endif(WIN32)
 SET_TARGET_PROPERTIES(lanes_core PROPERTIES PREFIX "")
 
 # ------------------------------------------------------------------------------
-target_compile_options(core PRIVATE
+target_compile_options(lanes_core PRIVATE
   /D_CRT_SECURE_NO_WARNINGS /D_WINDLL /std:c++20 /DNODEBUG)
 # ------------------------------------------------------------------------------
 

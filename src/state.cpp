@@ -31,14 +31,14 @@ THE SOFTWARE.
 ===============================================================================
 */
 
-#include "_pch.h"
-#include "state.h"
+#include "_pch.hpp"
+#include "state.hpp"
 
-#include "intercopycontext.h"
-#include "lane.h"
-#include "lanes.h"
-#include "tools.h"
-#include "universe.h"
+#include "intercopycontext.hpp"
+#include "lane.hpp"
+#include "lanes.hpp"
+#include "tools.hpp"
+#include "universe.hpp"
 
 // #################################################################################################
 // #################################################################################################
@@ -99,9 +99,9 @@ namespace {
                 DEBUGSPEW_CODE(DebugSpew(Universe::Get(L_)) << "opening '" << _name << "' library" << std::endl);
                 STACK_CHECK_START_REL(L_, 0);
                 // open the library as if through require(), and create a global as well if necessary (the library table is left on the stack)
-                bool const _isLanesCore{ _libfunc == luaopen_lanes_core }; // don't want to create a global for "lanes.core"
+                bool const _isLanesCore{ _libfunc == luaopen_lanes_core }; // don't want to create a global for "lanes_core"
                 luaL_requiref(L_, _name.data(), _libfunc, !_isLanesCore);                          // L_: {lib}
-                // lanes.core doesn't declare a global, so scan it here and now
+                // lanes_core doesn't declare a global, so scan it here and now
                 if (_isLanesCore) {
                     tools::PopulateFuncLookupTable(L_, kIdxTop, _name);
                 }
@@ -159,7 +159,7 @@ namespace state {
                         return luaL_newstate();
                     } else {
                         lanes::AllocatorDefinition const _def{ U->resolveAllocator(from, hint) };
-                        return lua_newstate(_def.allocF, _def.allocUD);
+                        return _def.newState();
                     }
                 }
             )
@@ -224,7 +224,7 @@ namespace state {
             if (_libs == "*") {
                 DEBUGSPEW_CODE(DebugSpew(U_) << "opening ALL standard libraries" << std::endl);
                 luaL_openlibs(_L);
-                // don't forget lanes.core for regular lane states
+                // don't forget lanes_core for regular lane states
                 Open1Lib(_L, kLanesCoreLibName);
                 _libs = ""; // done with libs
             } else {
@@ -239,7 +239,7 @@ namespace state {
                     lua_pop(_L, 1);
                 } else {
                     lua_pushcfunction(_L, luaopen_base);
-                    lua_pushstring(_L, "");
+                    luaG_pushstring(_L, "");
                     lua_call(_L, 1, 0);
                 }
             }
@@ -248,28 +248,21 @@ namespace state {
 
         // scan all libraries, open them one by one
         auto isLibNameChar = [](char const c_) {
-            // '.' can be part of name for "lanes.core"
             return std::isalnum(c_) || c_ == '.' || c_ == '-' || c_ == '_';
         };
         while (!_libs.empty()) {
             // remove prefix not part of a name
-            auto _nameStart{ std::find_if(std::cbegin(_libs), std::cend(_libs), isLibNameChar) };
-            if (_nameStart == _libs.end()) {
-                break;
-            }
-            auto const _prefixLen{ std::distance(_libs.begin(), _nameStart) };
-
-            auto const _nameEnd{ std::find_if(_nameStart, std::cend(_libs), [&isLibNameChar](char const _c) { return !isLibNameChar(_c); }) };
-            // advance to the end of the character sequence composing the name
-            auto const _nameLen{ std::distance(_nameStart, _nameEnd) };
-            if (_nameLen == 0) {
+            _libs = std::string_view{ std::find_if(std::cbegin(_libs), std::cend(_libs), isLibNameChar), _libs.end() };
+            // extract a single name
+            auto const _libNameEnd{ std::find_if(std::cbegin(_libs), std::cend(_libs), [&isLibNameChar](char const _c) { return !isLibNameChar(_c); }) };
+            std::string_view const _libName{ _libs.begin(), _libNameEnd };
+            if (_libName.empty()) {
                 break;
             }
             // open library
-            std::string_view const _libName{ _libs.substr(_prefixLen, _nameLen) };
             Open1Lib(_L, _libName);
-            // advance to next item (can't do this earlier as it invalidates iterators)
-            _libs.remove_prefix(_prefixLen + _nameLen);
+            // advance to next item
+            _libs = std::string_view{ _libNameEnd, _libs.end() };
         }
         lua_gc(_L, LUA_GCRESTART, 0);
 
@@ -305,7 +298,7 @@ namespace state {
                 lua_pushvalue(_L, -5);                                                             // L: {} k v "[" 'k' "] = " tostring v
                 lua_call(_L, 1, 1);                                                                // L: {} k v "[" 'k' "] = " 'v'
                 lua_concat(_L, 4);                                                                 // L: {} k v "[k] = v"
-                DEBUGSPEW_CODE(DebugSpew(U_) << luaG_tostring(_L, -1) << std::endl);
+                DEBUGSPEW_CODE(DebugSpew(U_) << luaG_tostring(_L, kIdxTop) << std::endl);
                 lua_pop(_L, 2);                                                                    // L: {} k
             } // lua_next()                                                                        // L: {}
             lua_pop(_L, 1);                                                                        // L:

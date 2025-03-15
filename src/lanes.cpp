@@ -79,17 +79,18 @@ THE SOFTWARE.
 ===============================================================================
 */
 
-#include "_pch.h"
-#include "lanes.h"
+#include "_pch.hpp"
+#include "lanes.hpp"
 
-#include "deep.h"
-#include "intercopycontext.h"
-#include "keeper.h"
-#include "lane.h"
-#include "nameof.h"
-#include "state.h"
-#include "threading.h"
-#include "tools.h"
+#include "deep.hpp"
+#include "intercopycontext.hpp"
+#include "keeper.hpp"
+#include "lane.hpp"
+#include "linda.hpp"
+#include "nameof.hpp"
+#include "state.hpp"
+#include "threading.hpp"
+#include "tools.hpp"
 
 #if !(defined(PLATFORM_XBOX) || defined(PLATFORM_WIN32) || defined(PLATFORM_POCKETPC))
 #include <sys/time.h>
@@ -213,14 +214,17 @@ LUAG_FUNC(require)
 // --- If a client wants to transfer stuff of a previously required module from the current state to another Lane, the module must be registered
 // to populate the lookup database in the source lane (and in the destination too, of course)
 // lanes.register( "modname", module)
-LUAG_FUNC(register)
+int lanes_register(lua_State* const L_)
 {
+    Universe* const _U{ Universe::Get(L_) };
+    if (!_U) {
+        raise_luaL_error(L_, "Lanes is not ready");
+    }
     std::string_view const _name{ luaG_checkstring(L_, StackIndex{ 1 }) };
     LuaType const _mod_type{ luaG_type(L_, StackIndex{ 2 }) };
     // ignore extra arguments, just in case
     lua_settop(L_, 2);
     luaL_argcheck(L_, (_mod_type == LuaType::TABLE) || (_mod_type == LuaType::FUNCTION), 2, "unexpected module type");
-    DEBUGSPEW_CODE(Universe* _U = Universe::Get(L_));
     STACK_CHECK_START_REL(L_, 0); // "name" mod_table
     DEBUGSPEW_CODE(DebugSpew(_U) << "lanes.register '" << _name << "' BEGIN" << std::endl);
     DEBUGSPEW_CODE(DebugSpewIndentScope _scope{ _U });
@@ -282,7 +286,7 @@ LUAG_FUNC(lane_new)
         raise_luaL_error(L_, "could not create lane: out of memory");
     }
 
-    class OnExit
+    class OnExit final
     {
         private:
         lua_State* const L;
@@ -312,7 +316,7 @@ LUAG_FUNC(lane_new)
                 {
                     std::lock_guard _guard{ lane->doneMutex };
                     // this will cause lane_main to skip actual running (because we are not Pending anymore)
-                    lane->status = Lane::Running;
+                    lane->status.store(Lane::Running, std::memory_order_release);
                 }
                 // unblock the thread so that it can terminate gracefully
 #ifndef __PROSPERO__
@@ -329,7 +333,7 @@ LUAG_FUNC(lane_new)
             DEBUGSPEW_CODE(DebugSpew(lane->U) << "lane_new: preparing lane userdata" << std::endl);
             STACK_CHECK_START_REL(L, 0);
             // a Lane full userdata needs a single uservalue
-            Lane** const _ud{ luaG_newuserdatauv<Lane*>(L, 1) };                                   // L: ... lane
+            Lane** const _ud{ luaG_newuserdatauv<Lane*>(L, UserValueCount{ 1 }) };                 // L: ... lane
             *_ud = lane; // don't forget to store the pointer in the userdata!
 
             // Set metatable for the userdata
@@ -342,7 +346,7 @@ LUAG_FUNC(lane_new)
             lua_newtable(L);                                                                       // L: ... lane {uv}
 
             // Store the gc_cb callback in the uservalue
-            StackIndex const _gc_cb_idx{ lua_isnoneornil(L, kGcCbIdx) ? 0 : kGcCbIdx };
+            StackIndex const _gc_cb_idx{ lua_isnoneornil(L, kGcCbIdx) ? kIdxNone : kGcCbIdx };
             if (_gc_cb_idx > 0) {
                 kLaneGC.pushKey(L);                                                                // L: ... lane {uv} k
                 lua_pushvalue(L, _gc_cb_idx);                                                      // L: ... lane {uv} k gc_cb
@@ -350,26 +354,29 @@ LUAG_FUNC(lane_new)
             }
             STACK_CHECK(L, 2);
             // store the uservalue in the Lane full userdata
-            lua_setiuservalue(L, StackIndex{ -2 }, 1);                                             // L: ... lane
+            lua_setiuservalue(L, StackIndex{ -2 }, UserValueIndex{ 1 });                           // L: ... lane
 
-            lua_State* const _L2{ lane->L };
-            STACK_CHECK_START_REL(_L2, 0);
-            StackIndex const _name_idx{ lua_isnoneornil(L, kNameIdx) ? 0 : kNameIdx };
-            std::string_view const _debugName{ (_name_idx > 0) ? luaG_tostring(L, _name_idx) : std::string_view{} };
+            StackIndex const _name_idx{ lua_isnoneornil(L, kNameIdx) ? kIdxNone : kNameIdx };
+            std::string_view _debugName{ (_name_idx > 0) ? luaG_tostring(L, _name_idx) : std::string_view{} };
             if (!_debugName.empty())
             {
-                if (_debugName != "auto") {
-                    luaG_pushstring(_L2, _debugName);                                              // L: ... lane                                    L2: "<name>"
-                } else {
-                    lua_Debug _ar;
-                    lua_pushvalue(L, kFuncIdx);                                                    // L: ... lane func
-                    lua_getinfo(L, ">S", &_ar);                                                    // L: ... lane
-                    luaG_pushstring(_L2, "%s:%d", _ar.short_src, _ar.linedefined);                 // L: ... lane                                    L2: "<name>"
+                if (_debugName == "auto") {
+                    if (luaG_type(L, kFuncIdx) == LuaType::STRING) {
+                        lua_Debug _ar;
+                        lua_getstack(L, 2, &_ar); // 0 is here, 1 is lanes.gen, 2 is its caller
+                        lua_getinfo(L, "Sl", &_ar);
+                        luaG_pushstring(L, "%s:%d", _ar.short_src, _ar.currentline);               // L: ... lane "<name>"
+                    } else {
+                        lua_Debug _ar;
+                        lua_pushvalue(L, kFuncIdx);                                                // L: ... lane func
+                        lua_getinfo(L, ">S", &_ar);                                                // L: ... lane
+                        luaG_pushstring(L, "%s:%d", _ar.short_src, _ar.linedefined);               // L: ... lane "<name>"
+                    }
+                    lua_replace(L, _name_idx);                                                     // L: ... lane
+                    _debugName = luaG_tostring(L, _name_idx);
                 }
-                lane->changeDebugName(kIdxTop);
-                lua_pop(_L2, 1);                                                                   // L: ... lane                                    L2:
+                lane->storeDebugName(_debugName);
             }
-            STACK_CHECK(_L2, 0);
             STACK_CHECK(L, 1);
         }
 
@@ -393,7 +400,7 @@ LUAG_FUNC(lane_new)
     // On some platforms, -3 is equivalent to -2 and +3 to +2
     int const _priority{
         std::invoke([L = L_]() {
-            int const _prio_idx{ lua_isnoneornil(L, kPrioIdx) ? 0 : kPrioIdx };
+            StackIndex const _prio_idx{ lua_isnoneornil(L, kPrioIdx) ? kIdxNone : kPrioIdx };
             if (_prio_idx == 0) {
                 return kThreadPrioDefault;
             }
@@ -412,7 +419,7 @@ LUAG_FUNC(lane_new)
     STACK_CHECK_START_REL(L_, 0);
 
     // package
-    StackIndex const _package_idx{ lua_isnoneornil(L_, kPackIdx) ? 0 : kPackIdx };
+    StackIndex const _package_idx{ lua_isnoneornil(L_, kPackIdx) ? kIdxNone : kPackIdx };
     if (_package_idx != 0) {
         DEBUGSPEW_CODE(DebugSpew(_U) << "lane_new: update 'package'" << std::endl);
         // when copying with mode LookupMode::LaneBody, should raise an error in case of problem, not leave it one the stack
@@ -424,7 +431,7 @@ LUAG_FUNC(lane_new)
     STACK_CHECK(_L2, 0);
 
     // modules to require in the target lane *before* the function is transfered!
-    StackIndex const _required_idx{ lua_isnoneornil(L_, kRequIdx) ? 0 : kRequIdx };
+    StackIndex const _required_idx{ lua_isnoneornil(L_, kRequIdx) ? kIdxNone : kRequIdx };
     if (_required_idx != 0) {
         int _nbRequired{ 1 };
         DEBUGSPEW_CODE(DebugSpew(_U) << "lane_new: process 'required' list" << std::endl);
@@ -473,7 +480,7 @@ LUAG_FUNC(lane_new)
     // Appending the specified globals to the global environment
     // *after* stdlibs have been loaded and modules required, in case we transfer references to native functions they exposed...
     //
-    StackIndex const _globals_idx{ lua_isnoneornil(L_, kGlobIdx) ? 0 : kGlobIdx };
+    StackIndex const _globals_idx{ lua_isnoneornil(L_, kGlobIdx) ? kIdxNone : kGlobIdx };
     if (_globals_idx != 0) {
         DEBUGSPEW_CODE(DebugSpew(_U) << "lane_new: transfer globals" << std::endl);
         if (!lua_istable(L_, _globals_idx)) {
@@ -645,11 +652,12 @@ extern LUAG_FUNC(linda);
 namespace {
     namespace local {
         static struct luaL_Reg const sLanesFunctions[] = {
+            { "collectgarbage", LG_collectgarbage }, 
             { Universe::kFinally, Universe::InitializeFinalizer },
             { "linda", LG_linda },
             { "nameof", LG_nameof },
             { "now_secs", LG_now_secs },
-            { "register", LG_register },
+            { "register", lanes_register },
             { "set_singlethreaded", LG_set_singlethreaded },
             { "set_thread_priority", LG_set_thread_priority },
             { "set_thread_affinity", LG_set_thread_affinity },
@@ -718,7 +726,8 @@ LUAG_FUNC(configure)
     }
 
     STACK_CHECK(L_, 2);
-    DeepFactory::PushDeepProxy(DestState{ L_ }, _U->timerLinda, 0, LookupMode::LaneBody, L_);      // L_: settings M timerLinda
+    UserValueCount const _nuv{ 0 }; // no uservalue in the linda
+    DeepFactory::PushDeepProxy(DestState{ L_ }, _U->timerLinda, _nuv, LookupMode::LaneBody, L_);   // L_: settings M timerLinda
     lua_setfield(L_, -2, "timerLinda");                                                            // L_: settings M
     STACK_CHECK(L_, 2);
 
@@ -758,7 +767,7 @@ LUAG_FUNC(configure)
 
     // register all native functions found in that module in the transferable functions database
     // we process it before _G because we don't want to find the module when scanning _G (this would generate longer names)
-    // for example in package.loaded["lanes.core"].*
+    // for example in package.loaded["lanes_core"].*
     tools::PopulateFuncLookupTable(L_, kIdxTop, _name);
     STACK_CHECK(L_, 2);
 
@@ -800,19 +809,19 @@ void signal_handler(int signal_)
 
 // helper to have correct callstacks when crashing a Win32 running on 64 bits Windows
 // don't forget to toggle Debug/Exceptions/Win32 in visual Studio too!
-static volatile long s_ecoc_initCount = 0;
-static volatile int s_ecoc_go_ahead = 0;
+static std::atomic_flag s_ecoc_initDone;
+static std::atomic_flag s_ecoc_go_ahead;
 static void EnableCrashingOnCrashes(void)
 {
-    if (InterlockedCompareExchange(&s_ecoc_initCount, 1, 0) == 0) {
-        typedef BOOL(WINAPI * tGetPolicy)(LPDWORD lpFlags);
-        typedef BOOL(WINAPI * tSetPolicy)(DWORD dwFlags);
+    if (!s_ecoc_initDone.test_and_set(std::memory_order_acquire)) {
+        using GetPolicy_t = BOOL(WINAPI *)(LPDWORD lpFlags);
+        using SetPolicy_t = BOOL(WINAPI *)(DWORD dwFlags);
         const DWORD EXCEPTION_SWALLOWING = 0x1;
 
         HMODULE _kernel32 = LoadLibraryA("kernel32.dll");
         if (_kernel32) {
-            tGetPolicy pGetPolicy = (tGetPolicy) GetProcAddress(_kernel32, "GetProcessUserModeExceptionPolicy");
-            tSetPolicy pSetPolicy = (tSetPolicy) GetProcAddress(_kernel32, "SetProcessUserModeExceptionPolicy");
+            auto pGetPolicy{ (GetPolicy_t) (void*) GetProcAddress(_kernel32, "GetProcessUserModeExceptionPolicy") };
+            auto pSetPolicy{ (SetPolicy_t) (void*) GetProcAddress(_kernel32, "SetProcessUserModeExceptionPolicy") };
             if (pGetPolicy && pSetPolicy) {
                 DWORD _dwFlags;
                 if (pGetPolicy(&_dwFlags)) {
@@ -825,11 +834,12 @@ static void EnableCrashingOnCrashes(void)
         // typedef void (* SignalHandlerPointer)( int);
         /*SignalHandlerPointer previousHandler =*/signal(SIGABRT, signal_handler);
 
-        s_ecoc_go_ahead = 1; // let others pass
+        // we are done, other threads waiting to initialize lanes can proceed
+        std::ignore = s_ecoc_go_ahead.test_and_set(std::memory_order_relaxed);
+        s_ecoc_go_ahead.notify_all();
     } else {
-        while (!s_ecoc_go_ahead) {
-            Sleep(1);
-        } // changes threads
+        // wait until flag becomes true
+        s_ecoc_go_ahead.wait(false, std::memory_order_relaxed);
     }
 }
 #endif // PLATFORM_WIN32 && !defined NDEBUG
@@ -859,11 +869,11 @@ LANES_API int luaopen_lanes_core(lua_State* const L_)
     // Create main module interface table
     // we only have 1 closure, which must be called to configure Lanes
     lua_newtable(L_);                                                                              // L_: M
-    lua_pushvalue(L_, 1);                                                                          // L_: M "lanes.core"
-    lua_pushvalue(L_, -2);                                                                         // L_: M "lanes.core" M
+    lua_pushvalue(L_, 1);                                                                          // L_: M "lanes_core"
+    lua_pushvalue(L_, -2);                                                                         // L_: M "lanes_core" M
     lua_pushcclosure(L_, LG_configure, 2);                                                         // L_: M LG_configure()
     kConfigRegKey.pushValue(L_);                                                                   // L_: M LG_configure() settings
-    if (!lua_isnil(L_, -1)) { // this is not the first require "lanes.core": call configure() immediately
+    if (!lua_isnil(L_, -1)) { // this is not the first require "lanes_core": call configure() immediately
         lua_pushvalue(L_, -1);                                                                     // L_: M LG_configure() settings settings
         lua_setfield(L_, -4, "settings");                                                          // L_: M LG_configure() settings
         lua_call(L_, 1, 0);                                                                        // L_: M
@@ -879,7 +889,8 @@ LANES_API int luaopen_lanes_core(lua_State* const L_)
 
 // #################################################################################################
 
-[[nodiscard]] static int default_luaopen_lanes(lua_State* const L_)
+[[nodiscard]]
+static int default_luaopen_lanes(lua_State* const L_)
 {
     LuaError const _rc{ luaL_loadfile(L_, "lanes.lua") || lua_pcall(L_, 0, 1, 0) };
     if (_rc != LuaError::OK) {
@@ -894,8 +905,8 @@ LANES_API int luaopen_lanes_core(lua_State* const L_)
 LANES_API void luaopen_lanes_embedded(lua_State* const L_, lua_CFunction const luaopen_lanes_)
 {
     STACK_CHECK_START_REL(L_, 0);
-    // pre-require lanes.core so that when lanes.lua calls require "lanes.core" it finds it is already loaded
-    luaL_requiref(L_, kLanesCoreLibName, luaopen_lanes_core, 0);                                   // L_: ... lanes.core
+    // pre-require lanes_core so that when lanes.lua calls require "lanes_core" it finds it is already loaded
+    luaL_requiref(L_, kLanesCoreLibName, luaopen_lanes_core, 0);                                   // L_: ... lanes_core
     lua_pop(L_, 1);                                                                                // L_: ...
     STACK_CHECK(L_, 0);
     // call user-provided function that runs the chunk "lanes.lua" from wherever they stored it

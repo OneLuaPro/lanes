@@ -35,7 +35,7 @@ THE SOFTWARE.
 ===============================================================================
 ]]--
 
-local core = require "lanes.core"
+local core = require "lanes_core"
 -- Lua 5.1: module() creates a global variable
 -- Lua 5.2: module() is gone
 -- almost everything module() does is done by require() anyway
@@ -228,7 +228,7 @@ local valid_libs =
     ["table"] = true,
     ["utf8"] = true,
     --
-    ["lanes.core"] = true
+    ["lanes_core"] = true
 }
 -- same structure, but contains only the libraries that the current Lua flavor actually supports
 local supported_libs
@@ -329,8 +329,8 @@ local process_gen_opt = function(...)
             error "Libs specification '*' must be used alone"
         end
         local found = {}
-        -- accept lib identifiers followed by an optional question mark
-        for s, question in string_gmatch(libs, "([%a%d.]+)(%??)") do
+        -- accept lib identifiers (alphanumeric plus '.-_'), followed by an optional question mark
+        for s, question in string_gmatch(libs, "([%-%w_.]+)(%??)") do
             if not valid_libs[s] then
                 error("Bad library name: " .. string_format("%q", tostring(s)), 2)
             end
@@ -448,6 +448,7 @@ local configure_timers = function()
 
     -- Timer lane; initialize only on the first 'require "lanes"' instance (which naturally has 'table' always declared)
     local first_time_key = "first time"
+    timerLinda:restrict(first_time_key, "set/get")
     local _, _first_time_val = timerLinda:get(first_time_key)
     local first_time = (_first_time_val == nil)
     timerLinda:set(first_time_key, true)
@@ -642,7 +643,7 @@ local configure_timers = function()
                 end
             end
         end -- timer_body()
-        timer_lane = gen("lanes.core,table", { name = "LanesTimer", package = {}, priority = core.max_prio }, timer_body)()
+        timer_lane = gen("lanes_core,table", { name = "LanesTimer", package = {}, priority = core.max_prio }, timer_body)()
     end -- first_time
 
     -----
@@ -850,6 +851,7 @@ local configure = function(settings_)
 
     -- activate full interface
     lanes.cancel_error = core.cancel_error
+    lanes.collectgarbage = core.collectgarbage
     lanes.finally = core.finally
     lanes.linda = core.linda
     lanes.nameof = core.nameof

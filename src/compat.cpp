@@ -1,15 +1,15 @@
-#include "_pch.h"
-#include "compat.h"
+#include "_pch.hpp"
+#include "compat.hpp"
 
-#include "macros_and_utils.h"
+#include "macros_and_utils.hpp"
 
 // #################################################################################################
 
-int luaG_getalluservalues(lua_State* const L_, StackIndex const idx_)
+UserValueCount luaG_getalluservalues(lua_State* const L_, StackIndex const idx_)
 {
     STACK_CHECK_START_REL(L_, 0);
     StackIndex const _idx{ luaG_absindex(L_, idx_) };
-    int _nuv{ 0 };
+    UserValueIndex _nuv{ 0 };
     do {
         // we don't know how many uservalues we are going to extract, there might be a lot...
         STACK_GROW(L_, 1);
@@ -18,7 +18,7 @@ int luaG_getalluservalues(lua_State* const L_, StackIndex const idx_)
     lua_pop(L_, 1);                                                                                // L_: ... [uv]*
     --_nuv;
     STACK_CHECK(L_, _nuv);
-    return _nuv;
+    return UserValueCount{ _nuv.value() };
 }
 
 // #################################################################################################
@@ -83,7 +83,7 @@ void luaL_requiref(lua_State* L_, const char* modname_, lua_CFunction openf_, in
 // #################################################################################################
 // #################################################################################################
 
-void* lua_newuserdatauv(lua_State* L_, size_t sz_, [[maybe_unused]] int nuvalue_)
+void* lua_newuserdatauv(lua_State* const L_, size_t const sz_, [[maybe_unused]] UserValueCount const nuvalue_)
 {
     LUA_ASSERT(L_, nuvalue_ <= 1);
     return lua_newuserdata(L_, sz_);
@@ -92,7 +92,7 @@ void* lua_newuserdatauv(lua_State* L_, size_t sz_, [[maybe_unused]] int nuvalue_
 // #################################################################################################
 
 // push on stack uservalue #n of full userdata at idx
-int lua_getiuservalue(lua_State* const L_, StackIndex const idx_, int const n_)
+int lua_getiuservalue(lua_State* const L_, StackIndex const idx_, UserValueIndex const n_)
 {
     STACK_CHECK_START_REL(L_, 0);
     // full userdata can have only 1 uservalue before 5.4
@@ -120,16 +120,16 @@ int lua_getiuservalue(lua_State* const L_, StackIndex const idx_, int const n_)
 #endif// LUA_VERSION_NUM > 501
     STACK_CHECK(L_, 1);
     int const _uvType{ lua_type(L_, -1) };
-    // under Lua 5.2, there is a single uservalue that is either nil or a table.
-    // If nil, don't transfer it, as it can cause issues when copying to a Keeper state because of nil sentinel conversion
-    return (LUA_VERSION_NUM == 502 && _uvType == LUA_TNIL) ? LUA_TNONE : _uvType;
+    // under Lua 5.2 and 5.3, there is a single uservalue, that can be nil.
+    // emulate 5.4 behavior by returning LUA_TNONE when that's the case
+    return (_uvType == LUA_TNIL) ? LUA_TNONE : _uvType;
 }
 
 // #################################################################################################
 
 // Pops a value from the stack and sets it as the new n-th user value associated to the full userdata at the given index.
 // Returns 0 if the userdata does not have that value.
-int lua_setiuservalue(lua_State* const L_, StackIndex const idx_, int const n_)
+int lua_setiuservalue(lua_State* const L_, StackIndex const idx_, UserValueIndex const n_)
 {
     if (n_ > 1
 #if LUA_VERSION_NUM == 501

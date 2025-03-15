@@ -1,9 +1,6 @@
 CHANGES:
 
-CHANGE 3: BGe 24-Sep-24
-    * Modernized lanes.gen() library list processing code.
-
-CHANGE 2: BGe 04-Jul-24
+CHANGE 2: BGe 27-Nov-24
     * Internal changes
         - Lanes is implemented in C++20: thread, condition_variable, mutex, string_view, variant, lambdas, templates, and more!
         - Almost all platform-specific code is gone (only a small bit for thread priority and affinity remains).
@@ -12,9 +9,12 @@ CHANGE 2: BGe 04-Jul-24
     * Lanes API changes
         - Version is now 4.0.0
         - Lanes module:
+            - shared library is now lanes_core.[so|dll] instead of lanes/core.[so|dll]
+            - lanes.register() is also available as lanes_register() in the exported C API.
             - lanes.sleep() accepts a new argument "indefinitely" to block forever (until hard cancellation is received).
             - function set_debug_threadname() available inside a Lane is renamed lane_threadname(); can now both read and write the name.
             - new function lanes.finally(). Installs a function that gets called at Lanes shutdown after attempting to terminate all lanes.
+            - new function lanes.collectgarbage(), to force a full GC cycle in the keeper states.
               If some lanes still run after the finalizer, Lanes with throw an exception or freeze, depending on its return value.
             - Configuration settings:
                 - Boolean parameters only accept boolean values.
@@ -25,6 +25,7 @@ CHANGE 2: BGe 04-Jul-24
                 - strip_functions added. Only useful for Lua 5.3+.
                 - verbose_errors removed. Use lane error_trace_level instead.
                 - with_timers is false by default.
+            - Non-deep full userdata are processed during module registration just like ordinary module C functions, making them valid transferable (up)values (for example: io.stdin).
         - Lanes:
             - Can no longer be "killed" by hard-stopping their thread without any resource cleanup (see lane:cancel()).
             - lanes.gen() settings:
@@ -46,8 +47,12 @@ CHANGE 2: BGe 04-Jul-24
             - linda:deep() result no longer contains the raw C pointer of the Linda object.
             - linda :receive(), :send(), :get(), :set(), :limit() return nil, error in case of problem. Returned values in case of success change too.
             - linda:limit() can be used to read the value if no new limit is provided.
+            - linda:restrict() can restrain the use of send/receive or set/get on any key.
             - New __close metamethod that calls any suitable handler that was provided at Linda creation.
-            - linda:dump outputs <key>.limit as 'unlimited' instead of -1 for unlimited keys.
+            - linda:dump() outputs <key>.limit as 'unlimited' instead of -1 for unlimited keys.
+            - linda:wake() can wake up threads waiting for a Linda without doing any I/O on it.
+            - linda.status reads the cancel status of the Linda.
+            - new function linda:collectgarbage() to force collection of all stale data in the associated keeper.
             - Deep userdata are an acceptable key to send data into (for example, another linda).
         - Full userdata conversion:
             - __lanesconvert added.

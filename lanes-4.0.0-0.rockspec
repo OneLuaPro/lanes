@@ -47,7 +47,7 @@ build = {
 		{
 			modules =
 			{
-				["lanes.core"] =
+				["lanes_core"] =
 				{
 					libraries = "pthread"
 				},
@@ -61,6 +61,7 @@ build = {
 			sources =
 			{
 				"src/_pch.cpp",
+				"src/allocator.cpp",
 				"src/cancel.cpp",
 				"src/compat.cpp",
 				"src/deep.cpp",
@@ -71,9 +72,9 @@ build = {
 				"src/linda.cpp",
 				"src/lindafactory.cpp",
 				"src/nameof.cpp",
-				"src/tools.cpp",
 				"src/state.cpp",
 				"src/threading.cpp",
+				"src/tools.cpp",
 				"src/tracker.cpp",
 				"src/universe.cpp"
 			},

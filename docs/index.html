@@ -70,7 +70,7 @@
 			</p>
 
 			<p>
-				This document was revised on 24-Sep-24, and applies to version <tt>4.0.0</tt>.
+				This document was revised on 13-Dec-24, and applies to version <tt>4.0.0</tt>.
 			</p>
 		</font>
 	</center>
@@ -156,7 +156,7 @@
 </p>
 
 <p>
-	To install Lanes, all you need are the <tt>lanes.lua</tt> and <tt>lanes/core.so|dll</tt> files to be reachable by Lua (see LUA_PATH, LUA_CPATH).
+	To install Lanes, all you need are the <tt>lanes.lua</tt> and <tt>lanes_core.so|dll</tt> files to be reachable by Lua (see LUA_PATH, LUA_CPATH).
 	Or use <A HREF="http://www.luarocks.org" TARGET="_blank">Lua Rocks</A> package management.
 </p>
 
@@ -196,7 +196,7 @@
 	<table border="1" bgcolor="#FFFFE0" cellpadding="10" style="width:50%">
 	<tr>
 			<td>
-				<pre>	#include "lanes.h"</pre>
+				<pre>	#include "lanes.hpp"</pre>
 				<br />
 				<pre>	int load_lanes_lua(lua_State* L)</pre>
 				<pre>	{</pre>
@@ -436,11 +436,12 @@
 </p>
 
 <p>
-	Once Lanes is configured, one should register with Lanes the modules exporting functions that will be transferred either during lane generation or through <a href="#lindas">lindas</a>.
+	Once Lanes is configured, one should register with Lanes the modules exporting functions/userdata that will be transferred either during lane generation or through <a href="#lindas">lindas</a>.
 	<br />
 	Use <tt>lanes.require()</tt> for this purpose. This will call the original <tt>require()</tt>, then add the result to the lookup databases.
 	<br />
-	It is also possible to register a given module <i>a posteriori</i> with <tt>lanes.register()</tt>. This function will raise an error if the registered module is not a function or table.
+	It is also possible to register a given module <i>a posteriori</i> with <tt>lanes.register()</tt>. This function will raise an error if the registered module is not a function, table, or full userdata.<br />
+	Embedders can call the equivalent function <tt>lanes_register()</tt> from the C side, through <tt>lua_call()</tt> or similar.
 </p>
 
 <table border="1" bgcolor="#FFFFE0" cellpadding="10" style="width:50%">
@@ -451,6 +452,20 @@
 		</td>
 	</tr>
 </table>
+
+<p id="collectgarbage">
+	A full GC cycle can be triggered on all keeper states with <tt>lanes.collectgarbage()</tt>. This can force the collection of stale storage data for a collected Linda.
+</p>
+
+<p>
+	<table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%">
+		<tr>
+			<td>
+				<pre>	lanes.collectgarbage()</pre>
+			</td>
+		</tr>
+	</table>
+</p>
 
 <p id="finally">
 	It is also possible to install a function that will be called when Lanes is shutdown (that is, when the first state that required Lanes is closed).
@@ -471,7 +486,7 @@
 	Only the last registered finalizer is kept. It can be cleared by passing <tt>nil</tt> or nothing.<br />
 	The finalizer is called unprotected from inside <tt>__gc</tt> metamethod of Lanes's Universe. Therefore, if your finalizer raises an error, Lua rules regarding errors in finalizers apply normally.<br />
 	The installed function is called after all free-running lanes got a chance to terminate (see <a href="#shutdown_timeout"><tt>shutdown_timeout</tt></a>), but before lindas become unusable.<br />
-	The finalizer receives a single argument, a <tt>bool</tt> indicating whether some Lanes are still running or not at that point. It is possible to inspect them with <a href="#tracking">tracking</a>.<br />
+	The finalizer receives a single argument, a <tt>bool</tt> indicating whether all Lanes are successfully terminated at that point. It is possible to inspect them with <a href="#tracking">tracking</a>.<br />
 	If there are still running lanes when the finalizer returns: Lanes will throw a C++ <tt>std::logic_error</tt> if the finalizer returned <tt>"throw"</tt>. Any other value will cause Lanes to freeze forever.
 </p>
 
@@ -673,7 +688,7 @@
 			</td>
 			<td />
 			<td>
-				All standard libraries (including those specific to LuaJIT and not listed above), as well as <tt>lanes.core</tt>. This must be used alone.
+				All standard libraries (including those specific to LuaJIT and not listed above), as well as <tt>lanes_core</tt>. This must be used alone.
 			</td>
 		</tr>
 	</table>
@@ -714,7 +729,7 @@
 			</td>
 			<td>table</td>
 			<td>
-				Lists modules that have to be required in order to be able to transfer functions they exposed. Non-Lua functions are <a href="#function_notes">searched in lookup tables</a>.
+				Lists modules that have to be required in order to be able to transfer functions/userdata they exposed. Non-Lua functions are <a href="#function_notes">searched in lookup tables</a>.
 				These tables are built from the modules listed here. <tt>required</tt> must be an array of strings, each one being the name of a module to be required. Each module is required with <tt>require()</tt> before the lanes function is invoked.
 				So, from the required module's point of view, requiring it manually from inside the lane body or having it required this way doesn't change anything. From the lane body's point of view, the only difference is that a module not creating a global won't be accessible.
 				Therefore, a lane body will also have to require a module manually, but this won't do anything more (see Lua's <tt>require</tt> documentation).	<br />
@@ -779,13 +794,13 @@
 	Change <tt>HAVE_DECODA_SUPPORT()</tt> in <tt>lanesconf.h</tt> to enable the Decoda support, that sets a special global variable <tt>decoda_name</tt> in the lane's state.<br />
 	The name is stored inside the Lua state registry so that it is available for error reporting. Changing <tt>decoda_name</tt> doesn't affect this hidden name or the OS thread name reported by MSVC.<br />
 	When Lanes is initialized by the first <a href="#initialization"><tt>lanes.configure()</tt></a> call, <tt>"main"</tt> is stored in the registry in the same fashion (but <tt>decoda_name</tt> and the OS thread name are left unchanged).<br />
-	The lane also has a method <tt>lane:get_threadname()</tt> that gives access to that name from the caller side (returns <tt>"&lt;unnamed&gt;"</tt> if unset, <tt>"&lt;closed&gt;"</tt> if the internal Lua state is closed).<br />
+	The lane also has a method <tt>lane:get_threadname()</tt> that gives access to that name from the caller side (returns <tt>"&lt;unnamed&gt;"</tt> if unset).<br />
 	With Lua 5.4, Lanes have a <tt>__close</tt> metamethod, meaning they can be declared to-be-closed. <tt>__close</tt> calls <tt>lane:join(nil)</tt>.
 </p>
 
 <p>
-	If a lane body pulls a C function imported by a module required before Lanes itself (thus not through a hooked <tt>require()</tt>), the lane generator creation will raise an error.
-	The function name it shows is a path where it was found by scanning <tt>_G</tt> and the registry. As a utility, the name guessing functionality is exposed as such:
+	If a lane body pulls a C function or userdata exposed by a module required before Lanes itself (thus not through a hooked <tt>require()</tt>), the lane generator creation will raise an error.
+	The name in the message is a path where it was found by scanning <tt>_G</tt> and the registry. As a utility, the name guessing functionality is exposed as such:
 
 	<table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%">
 		<tr>
@@ -1217,7 +1232,7 @@
 	lane_h = lanes.gen("", loop)(10000)
 
 	while true do
-		local key, val = linda:receive(3.0, "x")    -- timeout in seconds
+		local slot, val = linda:receive(3.0, "x")    -- timeout in seconds
 		if val == nil then
 			print("timed out")
 			break
@@ -1232,19 +1247,20 @@
 	Characteristics of the Lanes implementation of lindas are:
 
 	<ul>
-		<li>Keys can be of boolean, number, string, light userdata, and deep userdata type. Tables and functions can't be keys because their identity isn't preserved when transfered from one Lua state to another.</li>
-		<li>values can be any type supported by inter-state copying (same <a href="#limitations">limits</a> as for function arguments and upvalues).</li>
+		<li>Slots can be of boolean, number, string, light userdata, and deep userdata type. Tables, functions and non-deep userdata can't be slots because their identity isn't preserved when transfered from one Lua state to another.</li>
+		<li>Values can be any type supported by inter-state copying (same <a href="#limitations">limits</a> as for function arguments and upvalues).</li>
 		<li>
-			Registered functions transiting into a Keeper state are converted to a special dummy function that holds its actual identity. On transit out, the identity is used to find the real function in the destination.
+			Registered functions and userdata transiting into a Keeper state are converted to a special dummy closure that holds its actual identity. On transit out, the identity is used to find the real function or userdata in the destination.
 			For that reason, it is not possible to run user code inside a Keeper state. The only exception is <a href="#on_state_create"><tt>on_state_create</tt></a>, which is handled in a special way.
 		</li>
 		<li>Consuming method is <tt>:receive</tt> (not in).</li>
 		<li>Non-consuming method is <tt>:get</tt> (not rd).</li>
 		<li>Two producer-side methods: <tt>:send</tt> and <tt>:set</tt> (not out).</li>
-		<li><tt>send</tt> allows for sending multiple values -atomically- to a given key.</li>
-		<li><tt>receive</tt> can wait for multiple keys at once.</li>
-		<li><tt>receive</tt> has a batched mode to consume more than one value from a single key, as in <tt>linda:receive(1.0, linda.batched, "key", 3, 6).</tt></li>
-		<li>Individual keys' queue length can be limited, balancing speed differences in a producer/consumer scenario (making <tt>:send</tt> wait).</li>
+		<li><tt>send</tt> allows for sending multiple values -atomically- to a given slot.</li>
+		<li><tt>receive</tt> can wait for multiple slots at once.</li>
+		<li><tt>receive</tt> has a batched mode to consume more than one value from a single slot, as in <tt>linda:receive(1.0, linda.batched, "slot", 3, 6).</tt></li>
+		<li><tt>restrict</tt> can restrain a particular slot to function either with <tt>send/receive</tt> or <tt>set/get</tt>.</li>
+		<li>Individual slots' queue length can be limited, balancing speed differences in a producer/consumer scenario (making <tt>:send</tt> wait).</li>
 		<li><tt>tostring(linda)</tt> returns a string of the form <tt>"Linda: &lt;opt_name&gt;"</tt></li>
 		<li>
 			Several linda objects may share the same <a href="#keepers">Keeper state</a>. In case there is more than one user <a href="#keepers">Keeper state</a>, assignation must be controlled with the linda's group (an integer in <tt>[0,nb_user_keepers]</tt>).
@@ -1271,62 +1287,81 @@
 </p>
 
 <table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%"><tr><td><pre>
-	bool,string|(nil,[lanes.cancel_error|"timeout"]) = h:limit(key, &lt;limit&gt;)
-	(number|string),string = h:limit(key)
+	bool,string|(nil,[lanes.cancel_error|"timeout"]) = h:limit(slot, &lt;limit&gt;)
+	(number|string),string = h:limit(slot)
 </pre></td></tr></table>
 
 <p>
 	By default, queue sizes are unlimited but limits can be enforced using the <tt>limit()</tt> method. This can be useful to balance execution speeds in a producer/consumer scenario.<br />
 	A limit of 0 is allowed to block everything. <tt>"unlimited"</tt> removes the limit.<br />
-	If the key was full but the limit change added some room, <tt>limit()</tt> first return value is <tt>true</tt> and the linda is signalled so that <tt>send()</tt>-blocked threads are awakened, else the return value is <tt>false</tt>.
-	If no limit is provided, <tt>limit()</tt> first return value is the current limit for the specified key.<br />
-	The second returned value is a string representing the fill status relatively to the key's current limit (one of <tt>"over"</tt>, <tt>"under"</tt>, <tt>"exact"</tt>).
+	If the slot was full but the limit change added some room, <tt>limit()</tt> first return value is <tt>true</tt> and the linda is signalled so that <tt>send()</tt>-blocked threads are awakened, else the return value is <tt>false</tt>.
+	If no limit is provided, <tt>limit()</tt> first return value is the current limit for the specified slot.<br />
+	The second returned value is a string representing the fill status relatively to the slot's current limit (one of <tt>"over"</tt>, <tt>"under"</tt>, <tt>"exact"</tt>).
 	Whether reading or writing, if the linda is cancelled, <tt>limit()</tt> returns <tt>nil, lanes.cancel_error</tt>.
 </p>
 
 <table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%"><tr><td><pre>
-	true|lanes.cancel_error = h:send([timeout_secs,] key, ...)
+	string|(nil,[lanes.cancel_error|"timeout"]) = h:restrict(slot [, "&lt;mode&gt;"])
+	string = h:restrict(slot)
 </pre></td></tr></table>
 
 <p>
-	Timeouts are given in seconds (&gt= 0, millisecond accuracy) or <tt>nil</tt>. Timeout can be omitted only if the first key is not a number (then it is equivalent to an infinite duration).<br />
-	Each key acts as a FIFO queue. There is no limit to the number of keys a linda may contain. Different lindas can have identical keys, which are totally unrelated.
+	It is possible to restrict a particular slot in a Linda to either <tt>send/receive</tt> or <tt>set/get</tt> operations.<br />
+	Possible modes are <tt>"none"</tt>, <tt>"set/get"</tt> or <tt>"send/receive"</tt>.<br />
+	If a new mode is specified, <tt>restrict()</tt> updates the mode and returns the previous one.<br />
+	If no mode is specified, <tt>restrict()</tt> does nothing and returns the current mode.<br />
+	If the linda is cancelled, <tt>restrict()</tt> returns <tt>nil, lanes.cancel_error</tt>.<br />
+	If an unknown mode is specified, <tt>restrict()</tt> raises an error.
+</p>
+
+<table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%"><tr><td><pre>
+	true|lanes.cancel_error = h:send([timeout_secs,] slot, ...)
+</pre></td></tr></table>
+
+<p>
+	Timeouts are given in seconds (&gt= 0, millisecond accuracy) or <tt>nil</tt>. Timeout can be omitted only if the first slot is not a number (then it is equivalent to an infinite duration).<br />
+	Each slot acts as a FIFO queue. There is no limit to the number of slots a linda may contain. Different lindas can have identical slots, which are totally unrelated.
 </p>
 
 <p>
-	Multiple values can be sent to a given key at once, atomically (the send will fail unless all the values fit within the queue limit). This can be useful for multiple producer scenarios, if the protocols used are giving data in streams of multiple units.
+	Multiple values can be sent to a given slot at once, atomically (the send will fail unless all the values fit within the queue limit). This can be useful for multiple producer scenarios, if the protocols used are giving data in streams of multiple units.
 	Atomicity avoids the producers from garbling each others messages, which could happen if the units were sent individually.
 </p>
 
 <p>
-	If no data is provided after the key, <tt>send()</tt> raises an error.<br />
-	Also, if <tt>linda.null</tt> or <tt>lanes.null</tt> is sent as data in a linda, it will be read as a <tt>nil</tt>.<br />
+	If <tt>linda.null</tt> or <tt>lanes.null</tt> is sent as data in a linda, it will be read as a <tt>nil</tt>.<br />
+</p>
+
+<p>
+	<tt>send()</tt> raises an error if no data is provided after the slot.<br />
+	<tt>send()</tt> raises an error if called when a restriction forbids its use on the provided slot.<br />
+	<tt>send()</tt> raises <tt>lanes.cancel_error</tt> if interrupted by a hard cancel request.<br />
 	<tt>send()</tt> return values can be:
 	<ul>
 		<li><tt>true</tt> on success.</li>
 		<li><tt>nil, "timeout"</tt> if the queue limit was met, and the queue did not empty enough during the given duration.</li>
 		<li><tt>nil, lanes.cancel_error</tt> if interrupted by a soft cancel request.</li>
-		<li>Raises <tt>lanes.cancel_error</tt> if interrupted by a hard cancel request.</li>
 	</ul>
 </p>
 
 <table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%"><tr><td><pre>
-	key, val = h:receive([timeout_secs,] key [, key...])
+	slot, val = h:receive([timeout_secs,] slot [, slot...])
 
-	key, val [, val...] = h:receive([timeout,] h.batched, key, n_uint_min[, n_uint_max])
+	slot, val [, val...] = h:receive([timeout,] h.batched, slot, n_uint_min[, n_uint_max])
 </pre></td></tr></table>
+
+<p>
+	<tt>receive()</tt> raises an error if called when a restriction forbids its use on any provided slot.<br />
+	In batched mode, <tt>receive()</tt> will raise an error if <tt>min_count < 1</tt> or <tt>max_count < min_count</tt>.
+</p>
 
 <p>
 	Unbatched <tt>receive()</tt> return values can be:
 	<ul>
 		<li><tt>nil, lanes.cancel_error</tt> if interrupted by a hard cancel request.</li>
 		<li><tt>nil, "timeout"</tt> if nothing was available.</li>
-		<li>A key and the value extracted from it. Note that <tt>nil</tt> can be sent and received; the <tt>key</tt> value will tell it apart from a timeout.</li>
+		<li>A slot and the value extracted from it. Note that <tt>nil</tt> can be sent and received; the first returned value <tt>slot</tt> will tell it apart from a timeout.</li>
 	</ul>
-</p>
-
-<p>
-	In batched mode, <tt>linda:receive()</tt> will raise an error if <tt>min_count < 1</tt> or <tt>max_count < min_count</tt>.
 </p>
 
 <p>
@@ -1338,19 +1373,20 @@
 </p>
 
 <p>
-	When receiving from multiple slots, the keys are checked in order, which can	be used for making priority queues.
+	When receiving from multiple slots, the slots are checked in order, which can be used for making priority queues.
 </p>
 
 <table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%"><tr><td><pre>
-	(bool,string)|(nil,lanes.cancel_error) = linda_h:set(key [, val [, ...]])
+	(bool,string)|(nil,lanes.cancel_error) = linda_h:set(slot [, val [, ...]])
 
-	(number,[val [, ...]])|(nil,lanes.cancel_error) = linda_h:get(key [, count = 1])
+	(number,[val [, ...]])|(nil,lanes.cancel_error) = linda_h:get(slot [, count = 1])
 </pre></td></tr></table>
 
 <p>
-	<tt>get()</tt>/<tt>set()</tt> and <tt>send()</tt>/<tt>receive()</tt> can be used together; reading a slot essentially peeks the next outcoming value of a queue.<br />
-	<tt>get()</tt>/<tt>set()</tt> are for accessing a key without queuing or consuming. They can be used for making shared tables of storage among the lanes.<br />
-	Writing to a key never blocks because it ignores the limit. It overwrites existing values and clears any possible queued entries.<br />
+	<tt>set()</tt> and <tt>get()</tt> raise an error if used when a restriction forbids their use on the provided slot.<br />
+	Unless a particular slot is constrained with <tt>restrict()</tt>, <tt>get()</tt>/<tt>set()</tt> and <tt>send()</tt>/<tt>receive()</tt> can be used together; reading a slot essentially peeks the next outcoming value of a queue.<br />
+	<tt>get()</tt>/<tt>set()</tt> are for accessing a slot without queuing or consuming. They can be used for making shared tables of storage among the lanes.<br />
+	<tt>set()</tt> never blocks because it ignores the limit. It overwrites existing values and clears any possible queued entries.<br />
 </p>
 <p>
 	<tt>get()</tt> can read several values at once, and does not block. Return values ares:
@@ -1360,12 +1396,12 @@
 	</ul>
 </p>
 <p>
-	<tt>set()</tt> can write several values at the specified key. Writing <tt>nil</tt> values is possible, and clearing the contents at the specified key is done by not providing any value.<br />
+	<tt>set()</tt> can write several values at the specified slot. Writing <tt>nil</tt> values is possible, and clearing the contents at the specified slot is done by not providing any value.<br />
 	If <tt>set()</tt> actually stores data, the linda is signalled for write, so that <tt>receive()</tt>-blocked Lanes are awakened.<br />
-	Clearing the contents of a non-existent key does not create it!<br />
-	If the key was full but the new data count of the key after <tt>set()</tt> is below its limit, <tt>set()</tt> first return value is <tt>true</tt> and the linda is also signaled for read, so that <tt>send()</tt>-blocked Lanes are awakened.<br />
-	If the key was not already full, nothing additional happens, and <tt>set()</tt> first return value is <tt>false</tt>.<br />
-	The second return value is a string representing the fill status relatively to the key's current limit (one of <tt>"over"</tt>, <tt>"under"</tt>, <tt>"exact"</tt>).
+	Clearing the contents of a non-existent slot does not create it!<br />
+	If the slot was full but the new data count of the slot after <tt>set()</tt> is below its limit, <tt>set()</tt> first return value is <tt>true</tt> and the linda is also signaled for read, so that <tt>send()</tt>-blocked Lanes are awakened.<br />
+	If the slot was not already full, nothing additional happens, and <tt>set()</tt> first return value is <tt>false</tt>.<br />
+	The second return value is a string representing the fill status relatively to the slot's current limit (one of <tt>"over"</tt>, <tt>"under"</tt>, <tt>"exact"</tt>).
 </p>
 
 <p>
@@ -1373,25 +1409,35 @@
 </p>
 
 <table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%"><tr><td><pre>
-	[val] = linda_h:count([key[,...]])
+	linda_h:collectgarbage()
+</pre></td></tr></table>
+
+<p>
+	Forces a full garbage collect cycle inside the Keeper state assigned to the Linda (same as <tt>lua_gc(L, LUA_GCCOLLECT)</tt>).<br />
+	Can be useful to clean stale storage after some keys are cleaned.
+</p>
+
+<table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%"><tr><td><pre>
+	[val] = linda_h:count([slot[,...]])
 </pre></td></tr></table>
 
 <p>
 	Returns some information about the contents of the linda.<br />
-	If no key is specified, and the linda is empty, returns nothing.<br />
-	If no key is specified, and the linda is not empty, returns a table of key/count pairs that counts the number of items in each of the exiting keys of the linda. This count can be 0 if the key has been used but is empty.<br />
-	If a single key is specified, returns the number of pending items, or nothing if the key is unknown.<br />
-	If more than one key is specified, return a table of key/count pairs for the known keys.
+	If no slot is specified, and the linda is empty, returns nothing.<br />
+	If no slot is specified, and the linda is not empty, returns a table of slot/count pairs that counts the number of items in each of the exiting slots of the linda. This count can be 0 if the slot has been used but is empty.<br />
+	If a single slot is specified, returns the number of pending items, or nothing if the slot is unknown.<br />
+	If more than one slot is specified, return a table of slot/count pairs for the known slots.
 </p>
 
 <table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%"><tr><td><pre>
 	linda_h:dump() ->
 	{
-		[&lt;key&gt;] =
+		[&lt;slot&gt;] =
 		{
 			first = &lt;n&gt;
 			count = &lt;n&gt;
 			limit = &lt;n&gt;|'unlimited'
+			restrict = "none"|"set/get"|"send/receive"
 			fifo = { &lt;array of values&gt; }
 		}
 		...
@@ -1405,13 +1451,23 @@
 
 <table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%"><tr><td><pre>
 	void = linda_h:cancel("read"|"write"|"both"|"none")
+	"cancelled"|"active" = linda_h.status
 </pre></td></tr></table>
 
 <p>
-	Signals the linda so that lanes waiting for read, write, or both, wake up.
+	<tt>linda:cancel()</tt> signals the linda so that lanes waiting for read, write, or both, wake up.
 	All linda operations (including <tt>get()</tt> and <tt>set()</tt>) will return <tt>lanes.cancel_error</tt> as when the calling lane is <a href="#cancelling">soft-cancelled</a> as long as the linda is marked as cancelled.<br />
 	<tt>"none"</tt> reset the linda's cancel status, but doesn't signal it.<br />
+	<tt>linda.status</tt> reads the current cancel status.
 	If not void, the lane's cancel status overrides the linda's cancel status.
+</p>
+
+<table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%"><tr><td><pre>
+	void = linda_h:wake("read"|"write"|"both")
+</pre></td></tr></table>
+
+<p>
+	Signals the linda so that lanes waiting for read, write, or both, wake up. Does not change the current Linda's cancel status. Can be used to break early out of a blocking wait.
 </p>
 
 <table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%"><tr><td><pre>
@@ -1447,7 +1503,7 @@
 		</li>
 
 		<li>
-			Namespace control. linda keys have a "flat" namespace, so collisions are possible if you try to use the same linda for too many separate uses.
+			Namespace control. linda slots have a "flat" namespace, so collisions are possible if you try to use the same linda for too many separate uses.
 		</li>
 
 		<li>
@@ -1456,7 +1512,7 @@
 		</li>
 	</ul>
 
-	On the other side, you need to use a common linda for waiting for multiple keys. You cannot wait for keys from two separate linda objects at the same time.
+	On the other side, you need to use a common linda for waiting for multiple slots. You cannot wait for slots from two separate linda objects at the same time.
 </p>
 
 <p>
@@ -1469,7 +1525,7 @@
 <h2 id="timers">Timers</h2>
 
 <table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%"><tr><td><pre>
-	void = lanes.timer(linda_h, key, date_tbl|first_secs [,period_secs])
+	void = lanes.timer(linda_h, slot, date_tbl|first_secs [,period_secs])
 </pre></td></tr></table>
 
 <p>
@@ -1481,7 +1537,7 @@
 </p>
 
 <p>
-	Once a timer expires, the <tt>key</tt> is set with the current time (in seconds, same offset as <tt>os.time()</tt> but with millisecond accuracy). The key can be waited upon using the regular <a href="#lindas">linda</a> <tt>:receive()</tt> method.
+	Once a timer expires, the <tt>slot</tt> is set with the current time (in seconds, same offset as <tt>os.time()</tt> but with millisecond accuracy). The slot can be waited upon using the regular <a href="#lindas">linda</a> <tt>:receive()</tt> method.
 </p>
 
 <p>
@@ -1506,13 +1562,13 @@
 	lanes.timer(linda, "min", t, 60)   -- reoccur every minute (sharp)
 
 	while true do
-		local key, v = linda:receive("sec", "min")
-		print("Timer "..key..": "..v)
+		local slot, v = linda:receive("sec", "min")
+		print("Timer "..slot..": "..v)
 	end
 </pre></td></tr></table>
 
 <p>
-	NOTE: Timer keys are set, not queued, so missing a beat is possible especially if the timer cycle is extremely small. The key value can be used to know the actual time passed.
+	NOTE: Timer slots are set, not queued, so missing a beat is possible especially if the timer cycle is extremely small. The slot value can be used to know the actual time passed.
 </p>
 
 <table>
@@ -1522,7 +1578,7 @@
 			<font size="-1">
 				Having the API as <tt>lanes.timer()</tt> is intentional. Another alternative would be <tt>linda_h:timer()</tt> but timers are not traditionally seen to be part of lindas. Also, it would mean any lane getting a <a href="#lindas">linda</a> handle would be able to modify timers on it.
 				A third choice could be abstracting the timers out of <a href="#lindas">linda</a> realm altogether (<tt>timer_h= lanes.timer(date|first_secs, period_secs )</tt>) but that would mean separate waiting functions for timers, and lindas.
-				Even if a <a href="#lindas">linda</a> object and key was returned, that key couldn't be waited upon simultaneously with one's general <a href="#lindas">linda</a> events.
+				Even if a <a href="#lindas">linda</a> object and slot was returned, that slot couldn't be waited upon simultaneously with one's general <a href="#lindas">linda</a> events.
 				The current system gives maximum capabilities with minimum API, and any smoothenings can easily be crafted in Lua at the application level.
 			</font>
 		</td>
@@ -1567,7 +1623,7 @@
 </p>
 
 <table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%"><tr><td><pre>
-	lock_func|lanes.cancel_error = lanes.genlock(linda_h, key [,N_uint=1])
+	lock_func|lanes.cancel_error = lanes.genlock(linda_h, slot [,N_uint=1])
 
 	bool|lanes.cancel_error = lock_func(M_uint [, "try"] )     -- acquire
 	..
@@ -1593,13 +1649,13 @@
 <p>
 
 <table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%"><tr><td><pre>
-	atomic_func|lanes.cancel_error = lanes.genatomic(linda_h, key [,initial_num=0.0])
+	atomic_func|lanes.cancel_error = lanes.genatomic(linda_h, slot [,initial_num=0.0])
 
 	new_num|lanes.cancel_error = atomic_func([diff_num=+1.0])
 </pre></td></tr></table>
 
 <p>
-	Each time called, the generated function will change <tt>linda[key]</tt> atomically, without other lanes being able to interfere. The new value is returned. You can use either <tt>diff 0.0</tt> or <tt>get</tt> to just read the current value.
+	Each time called, the generated function will change <tt>linda[slot]</tt> atomically, without other lanes being able to interfere. The new value is returned. You can use either <tt>diff 0.0</tt> or <tt>get</tt> to just read the current value.
 </p>
 
 <p>
@@ -1621,7 +1677,7 @@
 		<li>Booleans, numbers, strings, light userdata, Lua functions and tables of such can always be passed.</li>
 		<li>
 			Cyclic tables and/or duplicate references are allowed and reproduced appropriately, but only <u>within the same transmission</u>.
-			Using the same source table in multiple <a href="#lindas">linda</a> messages keeps no ties between the tables (this is the same reason why tables can't be used as keys).
+			Using the same source table in multiple <a href="#lindas">linda</a> messages keeps no ties between the tables (this is the same reason why tables can't be used as slots).
 		</li>
 		<li>
 			For tables and full userdata: before anything else, the metatable is searched for a <tt>__lanesconvert</tt> field. If found, the source object is converted as follows depending on <tt>__lanesconvert</tt>'s value:
@@ -1633,7 +1689,7 @@
 			</ul>
 		</li>
 		<li>
-			Non-converted full userdata can be passed only if it is prepared using the <a href="#deep_userdata">deep userdata</a> system, which handles its lifespan management.
+			Non-converted full userdata can be passed only if it registered, or prepared using the <a href="#deep_userdata">deep userdata</a> system, which handles its lifespan management.
 		</li>
 		<li>
 			Objects (tables with a metatable) are copyable between lanes. Metatables are assumed to be immutable; they are internally indexed and only copied once per each type of objects per lane.
@@ -1650,52 +1706,57 @@
 </p>
 
 
-<h3 id="function_notes">Notes about passing C functions</h3>
+<h3 id="function_notes">Notes about passing C functions and full userdata</h3>
 
 <p>
-	Functions are transfered as follows (more or less):
+	C functions and full userdata are transfered as follows (more or less):
 </p>
 
 <table border="1" bgcolor="#FFFFE0" cellpadding="10" style="width:50%"><tr><td><pre>
-	// expects a C function on top of the source Lua stack
-	copyFunction(lua_State *dest, lua_State* source)
+	// expects a C function or full userdata on top of the source Lua stack
+	copyValue(lua_State *dest, lua_State* source)
 	{
 		// fetch function 'name' from source lookup database
-		char const* funcname = lookup_func_name(source, -1);
-		// lookup a function bound to this name in the destination state, and push it on the stack
-		push_resolved_func(dest, funcname);
+		char const* valuename = lookup_name(source, -1);
+		// lookup a function or userdata bound to this name in the destination state, and push it on the stack
+		push_resolved_value(dest, valuename);
 	}
 </pre></td></tr></table>
 
 <p>
-	The devil lies in the details: what does "function lookup" mean?
+	The devil lies in the details: what does "lookup" mean?
 </p>
 
 <p>
-	Since functions are first class values, they don't have a name. All we know for sure is that when a C module registers some functions, they are accessible to the script that required the module through some exposed variables.
+	Since functions and full userdata are first class values, they don't have a name. All we know for sure is that when a C module registers some functions or full userdata, they are accessible to the script that required the module through some exposed variables.
 	<br />
 	For example, loading the <tt>string</tt> base library creates a table accessible when indexing the global environment with key <tt>"string"</tt>. Indexing this table with <tt>"match"</tt>, <tt>"gsub"</tt>, etc. will give us a function.
 	<br />
-	When a lane generator creates a lane and performs initializations described by the list of base libraries and the list of required modules, it recursively scans the table created by the initialisation of the module, looking for all values that are C functions.
+	Similarly, loading the <tt>io</tt> base library creates a table accessible when indexing the global environment with key <tt>"io"</tt>. Indexing this table with <tt>"open"</tt>, will give us a function, and <tt>"stdin"</tt> will give us a full userdata.
 	<br />
-	Each time a function is encountered, the sequence of keys that reached that function is contatenated in a (hopefully) unique name. The [name, function] and [function, name] pairs are both stored in a lookup table in all involved Lua states (main Lua state and lanes states).
+	When a lane generator creates a lane and performs initializations described by the list of base libraries and the list of required modules, it recursively scans the table created by the initialisation of the module, looking for all values that are C functions and full userdata.
 	<br />
-	Then when a function is transfered from one state to another, all we have to do is retrieve the name associated to a function in the source Lua state, then with that name retrieve the equivalent function that already exists in the destination state.
+	Each time a function or full userdata is encountered, the sequence of keys traversed to reach it is contatenated in a (hopefully) unique name. The [name, value] and [value, name] pairs are both stored in a lookup table in all involved Lua states (main Lua state and lanes states).
 	<br />
-	Note that there is no need to transfer upvalues, as they are already bound to the function registered in the destination state. (And in any event, it is not possible to create a closure from a C function pushed on the stack, it can only be created with a <tt>lua_CFunction</tt> pointer).
+	Then, when a function or full userdata is transfered from one state to another, all we have to do is retrieve the name associated to this value in the source Lua state, then with that name retrieve the equivalent value that already exists in the destination state.
+	<br />
+	Note that there is no need to transfer upvalues/uservalues, as they are already bound to the value registered in the destination state. (And in any event, it is not possible to create a closure from a C function pushed on the stack, it can only be created with a <tt>lua_CFunction</tt> pointer).
 </p>
 
 <p>
 	There are several issues here:
 	<ul>
-		<li>Some base libraries register some C functions in the global environment. Because of that, Lanes must scan the global namespace to find all C functions (such as <tt>error</tt>, <tt>print</tt>, etc.).</li>
 		<li>
-			Nothing prevents a script to create other references to a C function. For example one could do
+			Some base libraries register some C functions in the global environment. Because of that, Lanes must scan the global namespace to find all C functions (such as <tt>error</tt>, <tt>print</tt>, <tt>require</tt>, etc.).<br />
+			This happens a single time, when <a href="#initialization"><tt>lanes.configure()</tt></a> is called. Therefore, if some base libraries are not loaded before that point, it will not be possible to send values that reference stuff they offer unless they are manually registered with <tt>lanes.register()</tt>.
+		</li>
+		<li>
+			Nothing prevents a script to create other references to a C function or full userdata. For example one could do
 			<table border="1" bgcolor="#FFFFE0" cellpadding="10" style="width:50%"><tr><td><pre>
 				string2 = string
 			</pre></td></tr></table>
 			When iterating over all keys of the global table, Lanes has no guarantee that it will hit <tt>"string"</tt> before or after <tt>"string2"</tt>. However, the values associated to <tt>string.match</tt> and <tt>string2.match</tt> are the same C function.
-			Lanes doesn't normally expect a C function value to be encountered more than once. In the event it occurs, the shortest name that was computed is retained.
+			Lanes doesn't normally expect a C function or full userdata value to be encountered more than once. In the event it occurs, the shortest name that was computed is retained.
 			If Lanes processed <tt>"string2"</tt> first, it means that if the Lua state that contains the <tt>"string2"</tt> global name sends function <tt>string.match</tt>, <tt>lookup_func_name</tt> would return name <tt>"string2.match"</tt>, with the obvious effect that <tt>push_resolved_func</tt>
 			won't find <tt>"string2.match"</tt> in the destination lookup database, thus failing the transfer (even though this function exists, but is referenced under name <tt>"string.match"</tt>).
 		</li>
@@ -1707,9 +1768,9 @@
 			To circumvent this, Lanes has to select one name among all candidates, and the rule for this is to keep the 'smaller' one: first in byte count, then in lexical order.
 		</li>
 	</ul>
-	Another more immediate reason of failed transfer is when the destination state doesn't know about the C function that has to be transferred. This occurs if a function is transferred in a lane before it had a chance to scan the module.
-	If the C function is sent through a <a href="#lindas">linda</a>, it is enough for the destination lane body to have required the module before the function is sent.
-	But if the lane body provided to the generator has a C function as upvalue, the transfer itself must succeed, therefore the module that imported that C function must be required in the destination lane before the lane body starts executing. This is where the <a href = "#.required"><tt>.required</tt></a> options play their role.
+	Another more immediate reason of failed transfer is when the destination state doesn't know about the C function or full userdata that has to be transferred. This occurs if a value is transferred in a lane before it had a chance to scan the module that exposed it.
+	If the C function or full userdata is sent through a <a href="#lindas">linda</a>, it is sufficient for the destination lane body to have required the module before the function is sent.
+	But if the lane body provided to the generator has a C function or full userdata as upvalue, the transfer itself must succeed, therefore the module that exposed that C function or full userdata must be required in the destination lane before the lane body starts executing. This is where the <a href = "#.required"><tt>.required</tt></a> options play their role.
 </p>
 
 
@@ -1771,7 +1832,7 @@ static int clonable_lanesclone(lua_State* L)
 	<b>NOTE</b>: In the event the source userdata has uservalues, it is not necessary to create them for the clone, Lanes will handle their cloning.<br />
 	Of course, more complex objects may require smarter cloning behavior than a simple <tt>memcpy</tt>. Also, the module initialisation code should make each metatable accessible from the module table itself as in:
 <table border="1" bgcolor="#FFFFE0" cellpadding="10" style="width:50%"><tr><td><pre>
-int luaopen_deep_test(lua_State* L)
+int luaopen_deep_userdata_example(lua_State* L)
 {
 	luaL_newlib(L, deep_module);
 
@@ -1832,15 +1893,15 @@ class MyDeepFactory : public DeepFactory
 static MyDeepFactory g_MyDeepFactory;
 </pre></td></tr></table>
 		<ul>
-			<li><tt>newDeepObjectInternal</tt>: requests the creation of a new object, whose pointer is returned. Said object must derive from <tt>DeepPrelude</tt>.</li>
-			<li><tt>deleteDeepObjectInternal</tt>: should cleanup the object.</li>
-			<li><tt>createMetatable</tt>: should build a metatable for the object. Don't cache the metatable yourself, Lanes takes care of it (<tt>createMetatable</tt> should only be invoked once per state). Just push the metatable on the stack.</li>
-			<li><tt>moduleName</tt>: requests the name of the module that exports the factory, to be returned. It is necessary so that Lanes can require it in any lane state that receives a userdata. This is to prevent crashes in situations where the module could be unloaded while the factory pointer is still held.</li>
+			<li><tt>newDeepObjectInternal()</tt>: requests the creation of a new object, whose pointer is returned. Said object must derive from <tt>DeepPrelude</tt>.</li>
+			<li><tt>deleteDeepObjectInternal()</tt>: should cleanup the object.</li>
+			<li><tt>createMetatable()</tt>: should build a metatable for the object. Don't cache the metatable yourself, Lanes takes care of it (<tt>createMetatable</tt> should only be invoked once per state). Just push the metatable on the stack.</li>
+			<li><tt>moduleName()</tt>: requests the name of the module that exports the factory, to be returned. It is necessary so that Lanes can require it in any lane state that receives a userdata. This is to prevent crashes in situations where the module could be unloaded while the factory pointer is still held.</li>
 		</ul>
-		Take a look at <tt>LindaFactory</tt> in <tt>lindafactory.cpp</tt> or <tt>MyDeepFactory</tt> in <tt>deep_test.cpp</tt>.
+		Take a look at <tt>LindaFactory</tt> in <tt>lindafactory.cpp</tt> or <tt>MyDeepFactory</tt> in <tt>deep_userdata_example.cpp</tt>.
 	</li>
-	<li>Include <tt>"_pch.h", "deep.h"</tt> and either link against Lanes or statically compile <tt>compat.cpp deep.cpp</tt> into your module if you want to avoid a runtime dependency for users that will use your module without Lanes.
-	<li>Instanciate your userdata using <tt>yourFactoryObject.pushDeepUserdata()</tt>, instead of the regular <tt>lua_newuserdata()</tt>. Given a <tt>factory</tt>, it sets up the support structures and returns a state-specific proxy userdata for accessing your data. This proxy can also be copied over to other lanes.</li>
+	<li>Include <tt>"_pch.hpp", "deep.hpp"</tt> and either link against Lanes or statically compile <tt>compat.cpp deep.cpp</tt> into your module if you want to avoid a runtime dependency for users that will use your module without Lanes.
+	<li>Instanciate your userdata using <tt>yourFactoryObject.pushDeepUserdata()</tt>, instead of the regular <tt>lua_newuserdata()</tt>. Given a <tt>factory</tt>, it sets up the support structures and returns a state-specific proxy full userdata for accessing your data. This proxy can also be copied over to other lanes.</li>
 	<li>Accessing the deep userdata from your C code, use <tt>yourFactoryObject.toDeep()</tt> instead of the regular <tt>lua_touserdata()</tt>.</li>
 	<li>To push an existing proxy on the stack, use <tt>DeepPrelude::push(L)</tt>.</li>
 </ol>
@@ -1850,10 +1911,8 @@ static MyDeepFactory g_MyDeepFactory;
 </p>
 
 <p>
-	Deep userdata in transit inside <a href="#keepers">Keeper states</a> (sent in a <a href="#lindas">linda</a> but not yet consumed) don't call <tt>deleteDeepObjectInternal</tt> and aren't considered by reference counting. The rationale is the following:<br />
-	If some non-keeper state holds a deep userdata for some deep object, then even if the keeper collects its own deep userdata, it shouldn't be cleaned up since the refcount is not 0.<br />
-	OTOH, if a keeper state holds the last deep userdata for some deep object, then no lane can do actual work with it. Deep userdata's <tt>factory()</tt> interface is never accessed from a keeper state.<br />
-	Therefore, Lanes can just call <tt>deleteDeepObjectInternal</tt> when the last non-keeper-held deep userdata is collected, as long as it doesn't do the same in a keeper state after that, since any remaining deep userdata in <a href="#keepers">Keeper states</a> now hold stale pointers.
+	Pay attention to the fact a deep userdata last proxy can be held inside a Keeper state after being stored in a Linda and all other references are lost.
+	If the Linda then flushes its contents through garbage collection in the Keeper state or by being collected itself, it means that <tt>deleteDeepObjectInternal()</tt> can be called from inside a Keeper state.
 </p>
 
 <p>
@@ -1898,7 +1957,7 @@ static MyDeepFactory g_MyDeepFactory;
 	<ul>
 		<li>Data passing (arguments, upvalues, <a href="#lindas">linda</a> messages) is generally fast, doing two binary state-to-state copies (from source state to hidden state, hidden state to target state). Remember that not only the function you specify but also its upvalues, their upvalues, etc. etc. will get copied.</li>
 		<li>Lane startup is fast (1000's of lanes a second), depending on the number of standard libraries initialized. Initializing all standard libraries is about 3-4 times slower than having no standard libraries at all. If you throw in a lot of lanes per second, make sure you give them minimal necessary set of libraries.</li>
-		<li>Waiting lindas are woken up (and execute some hidden Lua code) each time <u>any</u> key in the <a href="#lindas">lindas</a> they are waiting for are changed. This may give essential slow-down (not measured, just a gut feeling) if a lot of <a href="#lindas">linda</a> keys are used. Using separate <a href="#lindas">lindas</a> for logically separate issues will help (which is good practice anyhow).</li>
+		<li>Waiting lindas are woken up (and execute some hidden Lua code) each time <u>any</u> slot in the <a href="#lindas">lindas</a> they are waiting for are changed. This may give essential slow-down (not measured, just a gut feeling) if a lot of <a href="#lindas">linda</a> slots are used. Using separate <a href="#lindas">lindas</a> for logically separate issues will help (which is good practice anyhow).</li>
 		<li><a href="#lindas">linda</a> objects are light. The memory footprint is two OS-level signalling objects (<tt>HANDLE</tt> or <tt>pthread_cond_t</tt>) for each, plus one C pointer for the proxies per each Lua state using the <a href="#lindas">linda</a>. Barely nothing.</li>
 		<li>Timers are light. You can probably expect timers up to 0.01 second resolution to be useful, but that is very system specific. All timers are merged into one main timer state (see <tt>timer.lua</tt>); no OS side timers are utilized.</li>
 		<li>If you are using a lot of <a href="#lindas">linda</a> objects, it may be useful to try having more of these <a href="#keepers">Keeper states</a>. By default, only one is used (see <a href="#initialization"><tt>lanes.configure()</tt></a>).</li>

@@ -1,8 +1,8 @@
 local lanes = require "lanes".configure{nb_user_keepers = 100, on_state_create = function() end}
 
 local SLEEP = function(...)
-    local k, v = lanes.sleep(...)
-    assert(k == nil and v == "timeout")
+	local k, v = lanes.sleep(...)
+	assert(k == nil and v == "timeout")
 end
 
 print("Name of table: ", lanes.nameof({}))
@@ -18,7 +18,7 @@ local body = function()
 end
 
 -- start the lane without any library
-local h = lanes.gen(nil, body)()
+local h = lanes.gen(nil, { name = 'auto' }, body)()
 SLEEP(0.1)
 print("Name of lane: ", lanes.nameof(h), "("..h.status..")")
 assert(h.status == "running")

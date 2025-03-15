@@ -32,11 +32,11 @@ THE SOFTWARE.
 ===============================================================================
 ]]--
 */
-#include "_pch.h"
-#include "cancel.h"
+#include "_pch.hpp"
+#include "cancel.hpp"
 
-#include "debugspew.h"
-#include "lane.h"
+#include "debugspew.hpp"
+#include "lane.hpp"
 
 // #################################################################################################
 // #################################################################################################
@@ -50,18 +50,19 @@ THE SOFTWARE.
  * Returns CANCEL_SOFT/HARD if any locks are to be exited, and 'raise_cancel_error()' called,
  * to make execution of the lane end.
  */
-[[nodiscard]] CancelRequest CheckCancelRequest(lua_State* const L_)
+[[nodiscard]]
+CancelRequest CheckCancelRequest(lua_State* const L_)
 {
-    Lane* const _lane{ kLanePointerRegKey.readLightUserDataValue<Lane>(L_) };
+    auto const* const _lane{ kLanePointerRegKey.readLightUserDataValue<Lane>(L_) };
     // 'lane' is nullptr for the original main state (and no-one can cancel that)
-    return _lane ? _lane->cancelRequest : CancelRequest::None;
+    return _lane ? _lane->cancelRequest.load(std::memory_order_relaxed) : CancelRequest::None;
 }
 
 // #################################################################################################
 // #################################################################################################
 
 //---
-// = thread_cancel( lane_ud [,timeout_secs=0.0] [,wake_lindas_bool=false] )
+// = lane_cancel( lane_ud [,timeout_secs=0.0] [,wake_lindas_bool=false] )
 //
 // The originator thread asking us specifically to cancel the other thread.
 //
@@ -80,41 +81,41 @@ THE SOFTWARE.
 // #################################################################################################
 // #################################################################################################
 
-CancelOp WhichCancelOp(std::string_view const& opString_)
+static std::optional<CancelOp> WhichCancelOp(std::string_view const& opString_)
 {
-    CancelOp _op{ CancelOp::Invalid };
-    if (opString_ == "hard") {
-        _op = CancelOp::Hard;
-    } else if (opString_ == "soft") {
-        _op = CancelOp::Soft;
+    if (opString_ == "soft") {
+        return std::make_optional<CancelOp>(CancelRequest::Soft, LuaHookMask::None);
+    } else if (opString_ == "hard") {
+        return std::make_optional<CancelOp>(CancelRequest::Hard, LuaHookMask::None);
     } else if (opString_== "call") {
-        _op = CancelOp::MaskCall;
+        return std::make_optional<CancelOp>(CancelRequest::Hard, LuaHookMask::Call);
     } else if (opString_ == "ret") {
-        _op = CancelOp::MaskRet;
+        return std::make_optional<CancelOp>(CancelRequest::Hard, LuaHookMask::Ret);
     } else if (opString_ == "line") {
-        _op = CancelOp::MaskLine;
+        return std::make_optional<CancelOp>(CancelRequest::Hard, LuaHookMask::Line);
     } else if (opString_ == "count") {
-        _op = CancelOp::MaskCount;
+        return std::make_optional<CancelOp>(CancelRequest::Hard, LuaHookMask::Count);
     } else if (opString_ == "all") {
-        _op = CancelOp::MaskAll;
+        return std::make_optional<CancelOp>(CancelRequest::Hard, LuaHookMask::All);
     }
-    return _op;
+    return std::nullopt;
 }
 
 // #################################################################################################
 
-[[nodiscard]] static CancelOp WhichCancelOp(lua_State* const L_, StackIndex const idx_)
+[[nodiscard]]
+static CancelOp WhichCancelOp(lua_State* const L_, StackIndex const idx_)
 {
     if (luaG_type(L_, idx_) == LuaType::STRING) {
         std::string_view const _str{ luaG_tostring(L_, idx_) };
-        CancelOp _op{ WhichCancelOp(_str) };
+        auto const _op{ WhichCancelOp(_str) };
         lua_remove(L_, idx_); // argument is processed, remove it
-        if (_op == CancelOp::Invalid) {
-            raise_luaL_error(L_, "invalid hook option %s", _str);
+        if (!_op.has_value()) {
+            raise_luaL_error(L_, "Invalid cancel operation '%s'", _str.data());
         }
-        return _op;
+        return _op.value();
     }
-    return CancelOp::Hard;
+    return CancelOp{ CancelRequest::Hard, LuaHookMask::None };
 }
 
 // #################################################################################################
@@ -131,27 +132,34 @@ CancelOp WhichCancelOp(std::string_view const& opString_)
 //
 LUAG_FUNC(cancel_test)
 {
-    CancelRequest _test{ CheckCancelRequest(L_) };
+    CancelRequest const _test{ CheckCancelRequest(L_) };
     lua_pushboolean(L_, _test != CancelRequest::None);
     return 1;
 }
 
 // #################################################################################################
 
-// bool[,reason] = lane_h:cancel( [mode, hookcount] [, timeout] [, wake_lane])
-LUAG_FUNC(thread_cancel)
+// bool[,reason] = lane_h:cancel( [cancel_op, hookcount] [, timeout] [, wake_lane])
+LUAG_FUNC(lane_cancel)
 {
-    Lane* const _lane{ ToLane(L_, StackIndex{ 1 }) };
-    CancelOp const _op{ WhichCancelOp(L_, StackIndex{ 2 }) }; // this removes the op string from the stack
+    Lane* const _lane{ ToLane(L_, StackIndex{ 1 }) };                                              // L_: lane [cancel_op, hookcount] [, timeout] [, wake_lane]
+    CancelOp const _op{ WhichCancelOp(L_, StackIndex{ 2 }) };                                      // L_: lane [hookcount] [, timeout] [, wake_lane]
 
-    int _hook_count{ 0 };
-    if (static_cast<int>(_op) > static_cast<int>(CancelOp::Soft)) { // hook is requested
-        _hook_count = static_cast<int>(luaL_checkinteger(L_, 2));
-        lua_remove(L_, 2); // argument is processed, remove it
-        if (_hook_count < 1) {
-            raise_luaL_error(L_, "hook count cannot be < 1");
+    int const _hook_count{ std::invoke([_op, L_]() {
+        if (_op.hookMask == LuaHookMask::None) {
+            // the caller shouldn't have provided a hook count in that case
+            return 0;
         }
-    }
+        if (luaG_type(L_, StackIndex{ 2 }) != LuaType::NUMBER) {
+            raise_luaL_error(L_, "Hook count expected");
+        }
+        auto const _hook_count{ static_cast<int>(lua_tointeger(L_, 2)) };
+        lua_remove(L_, 2); // argument is processed, remove it                                     // L_: lane [timeout] [, wake_lane]
+        if (_hook_count < 1) {
+            raise_luaL_error(L_, "Hook count cannot be < 1");
+        }
+        return _hook_count;
+    }) };
 
     std::chrono::time_point<std::chrono::steady_clock> _until{ std::chrono::time_point<std::chrono::steady_clock>::max() };
     if (luaG_type(L_, StackIndex{ 2 }) == LuaType::NUMBER) { // we don't want to use lua_isnumber() because of autocoercion
@@ -159,36 +167,43 @@ LUAG_FUNC(thread_cancel)
         if (duration.count() >= 0.0) {
             _until = std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(duration);
         } else {
-            raise_luaL_argerror(L_, StackIndex{ 2 }, "duration cannot be < 0");
+            raise_luaL_error(L_, "Duration cannot be < 0");
         }
-        lua_remove(L_, 2); // argument is processed, remove it
-    } else if (lua_isnil(L_, 2)) { // alternate explicit "infinite timeout" by passing nil before the key
-        lua_remove(L_, 2); // argument is processed, remove it
+        lua_remove(L_, 2); // argument is processed, remove it                                     // L_: lane [wake_lane]
+    } else if (lua_isnil(L_, 2)) { // alternate explicit "infinite timeout" by passing nil
+        lua_remove(L_, 2); // argument is processed, remove it                                     // L_: lane [wake_lane]
     }
 
     // we wake by default in "hard" mode (remember that hook is hard too), but this can be turned off if desired
-    bool _wake_lane{ _op != CancelOp::Soft };
+    WakeLane _wake_lane{ (_op.mode == CancelRequest::Hard) ? WakeLane::Yes : WakeLane::No };
     if (lua_gettop(L_) >= 2) {
         if (!lua_isboolean(L_, 2)) {
-            raise_luaL_error(L_, "wake_lindas argument is not a boolean");
+            raise_luaL_error(L_, "Boolean expected for wake_lane argument, got %s", luaG_typename(L_, StackIndex{ 2 }).data());
         }
-        _wake_lane = lua_toboolean(L_, 2);
-        lua_remove(L_, 2); // argument is processed, remove it
+        _wake_lane = lua_toboolean(L_, 2) ? WakeLane::Yes : WakeLane::No;
+        lua_remove(L_, 2); // argument is processed, remove it                                     // L_: lane
     }
-    STACK_CHECK_START_REL(L_, 0);
-    switch (_lane->cancel(_op, _hook_count, _until, _wake_lane)) {
+
+    // if the caller didn't fumble, we should have removed everything from the stack but the lane itself
+    if (lua_gettop(L_) > 1) {
+        raise_luaL_error(L_, "Too many arguments");
+    }
+    lua_pop(L_, 1);                                                                                // L_:
+
+    STACK_CHECK_START_ABS(L_, 0);
+    switch (_lane->cancel(_op, _until, _wake_lane, _hook_count)) {
     default: // should never happen unless we added a case and forgot to handle it
-        raise_luaL_error(L_, "should not get here!");
+        raise_luaL_error(L_, "Should not get here!");
         break;
 
     case CancelResult::Timeout:
-        lua_pushboolean(L_, 0);                                                                    // false
-        lua_pushstring(L_, "timeout");                                                             // false "timeout"
+        lua_pushboolean(L_, 0);                                                                    // L_: false
+        luaG_pushstring(L_, "timeout");                                                            // L_: false "timeout"
         break;
 
     case CancelResult::Cancelled:
-        lua_pushboolean(L_, 1);                                                                    // true
-        _lane->pushStatusString(L_);                                                               // true "<status>"
+        lua_pushboolean(L_, 1);                                                                    // L_: true
+        _lane->pushStatusString(L_);                                                               // L_: true "<status>"
         break;
     }
     STACK_CHECK(L_, 2);

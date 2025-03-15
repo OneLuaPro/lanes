@@ -23,13 +23,13 @@ THE SOFTWARE.
 
 ===============================================================================
 */
-#include "_pch.h"
-#include "lane.h"
+#include "_pch.hpp"
+#include "lane.hpp"
 
-#include "debugspew.h"
-#include "intercopycontext.h"
-#include "threading.h"
-#include "tools.h"
+#include "debugspew.hpp"
+#include "intercopycontext.hpp"
+#include "threading.hpp"
+#include "tools.hpp"
 
 // #################################################################################################
 
@@ -45,7 +45,7 @@ static constexpr UniqueKey kCachedTostring{ 0xAB5EA23BCEA0C35Cull };
 // #################################################################################################
 
 // lane:get_threadname()
-static LUAG_FUNC(get_threadname)
+static LUAG_FUNC(lane_get_threadname)
 {
     Lane* const _lane{ ToLane(L_, StackIndex{ 1 }) };
     luaL_argcheck(L_, lua_gettop(L_) == 1, 2, "too many arguments");
@@ -68,7 +68,7 @@ static LUAG_FUNC(set_finalizer)
     luaL_argcheck(L_, lua_gettop(L_) == 1, 1, "too many arguments");
     STACK_GROW(L_, 3);
     // Get the current finalizer table (if any), create one if it doesn't exist
-    std::ignore = kFinalizerRegKey.getSubTable(L_, 1, 0);                                          // L_: finalizer {finalisers}
+    std::ignore = kFinalizerRegKey.getSubTable(L_, NArr{ 1 }, NRec{ 0 });                          // L_: finalizer {finalisers}
     // must cast to int, not lua_Integer, because LuaJIT signature of lua_rawseti is not the same as PUC-Lua.
     int const _idx{ static_cast<int>(lua_rawlen(L_, kIdxTop) + 1) };
     lua_pushvalue(L_, 1);                                                                          // L_: finalizer {finalisers} finalizer
@@ -88,11 +88,12 @@ static LUAG_FUNC(lane_threadname)
     Lane* const _lane{ luaG_tolightuserdata<Lane>(L_, StackIndex{ lua_upvalueindex(1) }) };
     LUA_ASSERT(L_, L_ == _lane->L); // this function is exported in a lane's state, therefore it is callable only from inside the Lane's state
     if (lua_gettop(L_) == 1) {
-    lua_settop(L_, 1);
-    STACK_CHECK_START_REL(L_, 0);
-    _lane->changeDebugName(kIdxTop);
-    STACK_CHECK(L_, 0);
-    return 0;
+        lua_settop(L_, 1);
+        STACK_CHECK_START_REL(L_, 0);
+        _lane->storeDebugName(luaG_tostring(L_, kIdxTop));
+        _lane->applyDebugName();
+        STACK_CHECK(L_, 0);
+        return 0;
     } else if (lua_gettop(L_) == 0) {
         luaG_pushstring(L_, _lane->getDebugName());
         return 1;
@@ -111,7 +112,7 @@ static LUAG_FUNC(lane_threadname)
 //  error:     returns nil + error value [+ stack table]
 //  cancelled: returns nil
 //
-static LUAG_FUNC(thread_join)
+static LUAG_FUNC(lane_join)
 {
     Lane* const _lane{ ToLane(L_, StackIndex{ 1 }) };
 
@@ -143,14 +144,14 @@ static LUAG_FUNC(thread_join)
     int _ret{ 0 };
     int const _stored{ _lane->storeResults(L_) };
     STACK_GROW(L_, std::max(3, _stored + 1));
-    switch (_lane->status) {
+    switch (_lane->status.load(std::memory_order_acquire)) {
     case Lane::Suspended: // got yielded values
     case Lane::Done: // got regular return values
         {
             if (_stored == 0) {
                 raise_luaL_error(L_, _lane->L ? "First return value must be non-nil when using join()" : "Can't join() more than once or after indexing");
             }
-            lua_getiuservalue(L_, StackIndex{ 1 }, 1);                                             // L_: lane {uv}
+            lua_getiuservalue(L_, StackIndex{ 1 }, UserValueIndex{ 1 });                           // L_: lane {uv}
             for (int _i = 2; _i <= _stored; ++_i) {
                 lua_rawgeti(L_, 2, _i);                                                            // L_: lane {uv} results2...N
             }
@@ -163,7 +164,7 @@ static LUAG_FUNC(thread_join)
     case Lane::Error:
         {
             LUA_ASSERT(L_, _stored == 2 || _stored == 3);
-            lua_getiuservalue(L_, StackIndex{ 1 }, 1);                                             // L_: lane {uv}
+            lua_getiuservalue(L_, StackIndex{ 1 }, UserValueIndex{ 1 });                           // L_: lane {uv}
             lua_rawgeti(L_, 2, 2);                                                                 // L_: lane {uv} <error>
             lua_rawgeti(L_, 2, 3);                                                                 // L_: lane {uv} <error> <trace>|nil
             if (lua_isnil(L_, -1)) {
@@ -178,7 +179,7 @@ static LUAG_FUNC(thread_join)
 
     case Lane::Cancelled:
         LUA_ASSERT(L_, _stored == 2);
-        lua_getiuservalue(L_, StackIndex{ 1 }, 1);                                                // L_: lane {uv}
+        lua_getiuservalue(L_, StackIndex{ 1 }, UserValueIndex{ 1 });                              // L_: lane {uv}
         lua_rawgeti(L_, 2, 2);                                                                    // L_: lane {uv} cancel_error
         lua_rawgeti(L_, 2, 1);                                                                    // L_: lane {uv} cancel_error nil
         lua_replace(L_, -3);                                                                      // L_: lane nil cancel_error
@@ -187,7 +188,7 @@ static LUAG_FUNC(thread_join)
         break;
 
     default:
-        DEBUGSPEW_CODE(DebugSpew(nullptr) << "Unknown Lane status: " << static_cast<int>(_lane->status) << std::endl);
+        DEBUGSPEW_CODE(DebugSpew(nullptr) << "Unknown Lane status: " << static_cast<int>(_lane->status.load(std::memory_order_relaxed)) << std::endl);
         LUA_ASSERT(L_, false);
         _ret = 0;
     }
@@ -197,7 +198,7 @@ static LUAG_FUNC(thread_join)
 
 // #################################################################################################
 
-LUAG_FUNC(thread_resume)
+LUAG_FUNC(lane_resume)
 {
     static constexpr StackIndex kIdxSelf{ 1 };
     Lane* const _lane{ ToLane(L_, kIdxSelf) };
@@ -207,12 +208,13 @@ LUAG_FUNC(thread_resume)
     std::optional<Lane::Status> _hadToWait{}; // for debugging, if we ever raise the error just below
     {
         std::unique_lock _guard{ _lane->doneMutex };
-        if (_lane->status == Lane::Pending || _lane->status == Lane::Running || _lane->status == Lane::Resuming) {
-            _hadToWait = _lane->status;
-            _lane->doneCondVar.wait(_guard, [_lane]() { return _lane->status == Lane::Suspended; });
+        Lane::Status const _status{ _lane->status.load(std::memory_order_acquire) };
+        if (_status == Lane::Pending || _status == Lane::Running || _status == Lane::Resuming) {
+            _hadToWait = _status;
+            _lane->doneCondVar.wait(_guard, [_lane]() { return _lane->status.load(std::memory_order_acquire) == Lane::Suspended; });
         }
     }
-    if (_lane->status != Lane::Suspended) {
+    if (_lane->status.load(std::memory_order_acquire) != Lane::Suspended) {
         if (_hadToWait) {
             raise_luaL_error(L_, "INTERNAL ERROR: Lane status is %s instead of 'suspended'", _lane->threadStatusString().data());
         } else {
@@ -242,7 +244,7 @@ LUAG_FUNC(thread_resume)
     STACK_CHECK(_L2, _nargs); // we should have removed everything from the lane's stack, and pushed our args
     STACK_CHECK(L_, 1 + _nargs + _nresults); // and the results of the coroutine are on top here
     std::unique_lock _guard{ _lane->doneMutex };
-    _lane->status = Lane::Resuming;
+    _lane->status.store(Lane::Resuming, std::memory_order_release);
     _lane->doneCondVar.notify_one();
     return _nresults;
 }
@@ -252,7 +254,7 @@ LUAG_FUNC(thread_resume)
 // key is numeric, wait until the thread returns and populate the environment with the return values
 // If the return values signal an error, propagate it
 // Else If key is found in the environment, return it
-static int thread_index_number(lua_State* L_)
+static int lane_index_number(lua_State* L_)
 {
     static constexpr StackIndex kIdxSelf{ 1 };
 
@@ -282,7 +284,7 @@ static int thread_index_number(lua_State* L_)
 // If key is "status" return the thread status
 // If key is found in the environment, return it
 // Else raise an error
-static int thread_index_string(lua_State* L_)
+static int lane_index_string(lua_State* L_)
 {
     static constexpr StackIndex kIdxSelf{ 1 };
     static constexpr StackIndex kIdxKey{ 2 };
@@ -292,6 +294,15 @@ static int thread_index_string(lua_State* L_)
 
     std::string_view const _keystr{ luaG_tostring(L_, kIdxKey) };
     lua_settop(L_, 2); // keep only our original arguments on the stack
+
+    // look in metatable first
+    lua_getmetatable(L_, kIdxSelf);                                                                // L_: lane "key" mt
+    lua_replace(L_, -3);                                                                           // L_: mt "key"
+    if (luaG_rawget(L_, StackIndex{ -2 }) != LuaType::NIL) { // found something?                   // L_: mt value
+        return 1; // done
+    }
+
+    lua_pop(L_, 2);                                                                                // L_:
     if (_keystr == "status") {
         _lane->pushStatusString(L_);                                                               // L_: lane "key" "<status>"
         return 1;
@@ -300,21 +311,13 @@ static int thread_index_string(lua_State* L_)
         std::ignore = _lane->pushErrorTraceLevel(L_);                                              // L_: lane "key" "<level>"
         return 1;
     }
-    // return self.metatable[key]
-    lua_getmetatable(L_, kIdxSelf);                                                                // L_: lane "key" mt
-    lua_replace(L_, -3);                                                                           // L_: mt "key"
-    lua_rawget(L_, -2);                                                                            // L_: mt value
-    // only "cancel" and "join" are registered as functions, any other string will raise an error
-    if (!lua_iscfunction(L_, -1)) {
-        raise_luaL_error(L_, "can't index a lane with '%s'", _keystr.data());
-    }
-    return 1;
+    raise_luaL_error(L_, "unknown field '%s'", _keystr.data());
 }
 
 // #################################################################################################
 
 // lane:__index(key,usr) -> value
-static LUAG_FUNC(thread_index)
+static LUAG_FUNC(lane_index)
 {
     static constexpr StackIndex kIdxSelf{ 1 };
     static constexpr StackIndex kKey{ 2 };
@@ -323,22 +326,20 @@ static LUAG_FUNC(thread_index)
 
     switch (luaG_type(L_, kKey)) {
     case LuaType::NUMBER:
-        return thread_index_number(L_); // stack modification is undefined, returned value is at the top
+        return lane_index_number(L_); // stack modification is undefined, returned value is at the top
 
     case LuaType::STRING:
-        return thread_index_string(L_); // stack modification is undefined, returned value is at the top
+        return lane_index_string(L_); // stack modification is undefined, returned value is at the top
 
     default: // unknown key
         lua_getmetatable(L_, kIdxSelf);                                                            // L_: mt
         kCachedError.pushKey(L_);                                                                  // L_: mt kCachedError
-        lua_rawget(L_, -2);                                                                        // L_: mt error()
-        if (luaG_type(L_, kIdxTop) != LuaType::FUNCTION) {
+        if (luaG_rawget(L_, StackIndex{ -2 }) != LuaType::FUNCTION) {                              // L_: mt error()
             raise_luaL_error(L_, "INTERNAL ERROR: cached error() is a %s, not a function", luaG_typename(L_, kIdxTop).data());
         }
         luaG_pushstring(L_, "Unknown key: ");                                                      // L_: mt error() "Unknown key: "
         kCachedTostring.pushKey(L_);                                                               // L_: mt error() "Unknown key: " kCachedTostring
-        lua_rawget(L_, -4);                                                                        // L_: mt error() "Unknown key: " tostring()
-        if (luaG_type(L_, kIdxTop) != LuaType::FUNCTION) {
+        if (luaG_rawget(L_, StackIndex{ -4 }) != LuaType::FUNCTION) {                              // L_: mt error() "Unknown key: " tostring()
             raise_luaL_error(L_, "INTERNAL ERROR: cached tostring() is a %s, not a function", luaG_typename(L_, kIdxTop).data());
         }
         lua_pushvalue(L_, kKey);                                                                   // L_: mt error() "Unknown key: " tostring() k
@@ -481,7 +482,8 @@ int Lane::LuaErrorHandler(lua_State* L_)
 // ########################################## Finalizer ############################################
 // #################################################################################################
 
-[[nodiscard]] static int PushStackTrace(lua_State* const L_, Lane::ErrorTraceLevel const errorTraceLevel_, LuaError const rc_, [[maybe_unused]] StackIndex const stk_base_)
+[[nodiscard]]
+static int PushStackTrace(lua_State* const L_, Lane::ErrorTraceLevel const errorTraceLevel_, LuaError const rc_, [[maybe_unused]] StackIndex const stk_base_)
 {
     // Lua 5.1 error handler is limited to one return value; it stored the stack trace in the registry
     StackIndex const _top{ lua_gettop(L_) };
@@ -533,7 +535,8 @@ int Lane::LuaErrorHandler(lua_State* L_)
 // TBD: should we add stack trace on failing finalizer, wouldn't be hard..
 //
 
-[[nodiscard]] static LuaError run_finalizers(Lane* const lane_, Lane::ErrorTraceLevel const errorTraceLevel_, LuaError const lua_rc_)
+[[nodiscard]]
+static LuaError run_finalizers(Lane* const lane_, Lane::ErrorTraceLevel const errorTraceLevel_, LuaError const lua_rc_)
 {
     // if we are a coroutine, we can't run the finalizers in the coroutine state!
     lua_State* const _L{ lane_->S };
@@ -630,13 +633,16 @@ void Lane::selfdestructAdd()
     assert(selfdestruct_next == nullptr);
 
     selfdestruct_next = U->selfdestructFirst;
+    assert(selfdestruct_next);
+
     U->selfdestructFirst = this;
 }
 
 // #################################################################################################
 
 // A free-running lane has ended; remove it from selfdestruct chain
-[[nodiscard]] bool Lane::selfdestructRemove()
+[[nodiscard]]
+bool Lane::selfdestructRemove()
 {
     bool _found{ false };
     std::lock_guard<std::mutex> _guard{ U->selfdestructMutex };
@@ -645,7 +651,7 @@ void Lane::selfdestructAdd()
     // cancel/kill).
     //
     if (selfdestruct_next != nullptr) {
-        Lane* volatile* _ref = static_cast<Lane* volatile*>(&U->selfdestructFirst);
+        Lane** _ref{ &U->selfdestructFirst };
 
         while (*_ref != SELFDESTRUCT_END) {
             if (*_ref == this) {
@@ -656,7 +662,7 @@ void Lane::selfdestructAdd()
                 _found = true;
                 break;
             }
-            _ref = static_cast<Lane* volatile*>(&((*_ref)->selfdestruct_next));
+            _ref = &((*_ref)->selfdestruct_next);
         }
         assert(_found);
     }
@@ -700,15 +706,16 @@ static void lane_main(Lane* const lane_)
     }
 #endif // __PROSPERO__
 
+    lane_->applyDebugName();
     lua_State* const _L{ lane_->L };
     LuaError _rc{ LuaError::ERRRUN };
-    if (lane_->status == Lane::Pending) { // nothing wrong happened during preparation, we can work
+    if (lane_->status.load(std::memory_order_acquire) == Lane::Pending) { // nothing wrong happened during preparation, we can work
         // At this point, the lane function and arguments are on the stack, possibly preceded by the error handler
         int const _errorHandlerCount{ lane_->errorHandlerCount() };
         int _nargs{ lua_gettop(_L) - 1 - _errorHandlerCount };
         {
             std::unique_lock _guard{ lane_->doneMutex };
-            lane_->status = Lane::Running; // Pending -> Running
+            lane_->status.store(Lane::Running, std::memory_order_release); // Pending -> Running
         }
 
         PrepareLaneHelpers(lane_);
@@ -724,15 +731,15 @@ static void lane_main(Lane* const lane_)
                 if (_rc == LuaError::YIELD) {
                     // change our status to suspended, and wait until someone wants us to resume
                     std::unique_lock _guard{ lane_->doneMutex };
-                    lane_->status = Lane::Suspended; // Running -> Suspended
+                    lane_->status.store(Lane::Suspended, std::memory_order_release); // Running -> Suspended
                     lane_->doneCondVar.notify_one();
                     // wait until the user wants us to resume
                     // TODO: do I update waiting_on or not, so that the lane can be woken by cancellation requests here?
                     // lane_->waiting_on = &lane_->doneCondVar;
-                    lane_->doneCondVar.wait(_guard, [lane_]() { return lane_->status == Lane::Resuming; });
+                    lane_->doneCondVar.wait(_guard, [lane_]() { return lane_->status.load(std::memory_order_acquire) == Lane::Resuming; });
                     // here lane_->doneMutex is locked again
                     // lane_->waiting_on = nullptr;
-                    lane_->status = Lane::Running; // Resuming -> Running
+                    lane_->status.store(Lane::Running, std::memory_order_release); // Resuming -> Running
                     // on the stack we find the values pushed by lane:resume()
                     _nargs = lua_gettop(_L);
                 }
@@ -756,7 +763,7 @@ static void lane_main(Lane* const lane_)
         // in case of error and if it exists, fetch stack trace from registry and push it
         lane_->nresults += PushStackTrace(_L, lane_->errorTraceLevel, _rc, StackIndex{ 1 });       // L: retvals|error [trace]
 
-        DEBUGSPEW_CODE(DebugSpew(lane_->U) << "Lane " << _L << " body: " << GetErrcodeName(_rc) << " (" << (kCancelError.equals(_L, 1) ? "cancelled" : luaG_typename(_L, 1)) << ")" << std::endl);
+        DEBUGSPEW_CODE(DebugSpew(lane_->U) << "Lane " << _L << " body: " << GetErrcodeName(_rc) << " (" << (kCancelError.equals(_L, StackIndex{ 1 }) ? "cancelled" : luaG_typename(_L, StackIndex{ 1 })) << ")" << std::endl);
         // Call finalizers, if the script has set them up.
         // If the lane is not a coroutine, there is only a regular state, so everything is the same whether we use S or L.
         // If the lane is a coroutine, this has to be done from the master state (S), not the thread (L), because we can't lua_pcall in a thread state
@@ -787,7 +794,7 @@ static void lane_main(Lane* const lane_)
     Lane::Status const _st{ (_rc == LuaError::OK) ? Lane::Done : kCancelError.equals(_L, StackIndex{ 1 }) ? Lane::Cancelled : Lane::Error };
     // 'doneMutex' protects the -> Done|Error|Cancelled state change, and the Running|Suspended|Resuming state change too
     std::lock_guard _guard{ lane_->doneMutex };
-    lane_->status = _st;
+    lane_->status.store(_st, std::memory_order_release);
     lane_->doneCondVar.notify_one(); // wake up master (while 'lane_->doneMutex' is on)
 }
 
@@ -802,7 +809,7 @@ static LUAG_FUNC(lane_close)
 
     // no error if the lane body doesn't return a non-nil first value
     luaG_pushstring(L_, "close");                                                                  // L_: lane "close"
-    lua_pushcclosure(L_, LG_thread_join, 1);                                                       // L_: lane join()
+    lua_pushcclosure(L_, LG_lane_join, 1);                                                         // L_: lane join()
     lua_insert(L_, 1);                                                                             // L_: join() lane
     lua_call(L_, 1, LUA_MULTRET);                                                                  // L_: join() results
     return lua_gettop(L_);
@@ -828,10 +835,9 @@ static LUAG_FUNC(lane_gc)
     Lane* const _lane{ ToLane(L_, StackIndex{ 1 }) };                                              // L_: ud
 
     // if there a gc callback?
-    lua_getiuservalue(L_, StackIndex{ 1 }, 1);                                                     // L_: ud uservalue
+    lua_getiuservalue(L_, StackIndex{ 1 }, UserValueIndex{ 1 });                                   // L_: ud uservalue
     kLaneGC.pushKey(L_);                                                                           // L_: ud uservalue __gc
-    lua_rawget(L_, -2);                                                                            // L_: ud uservalue gc_cb|nil
-    if (!lua_isnil(L_, -1)) {
+    if (luaG_rawget(L_, StackIndex{ -2 }) != LuaType::NIL) {                                       // L_: ud uservalue gc_cb|nil
         lua_remove(L_, -2);                                                                        // L_: ud gc_cb|nil
         luaG_pushstring(L_, _lane->getDebugName());                                                // L_: ud gc_cb name
         _have_gc_cb = true;
@@ -840,10 +846,9 @@ static LUAG_FUNC(lane_gc)
     }
 
     // We can read 'lane->status' without locks, but not wait for it
-    if (_lane->status < Lane::Done) {
+    if (_lane->status.load(std::memory_order_acquire) < Lane::Done) {
         // still running: will have to be cleaned up later
         _lane->selfdestructAdd();
-        assert(_lane->selfdestruct_next);
         if (_have_gc_cb) {
             luaG_pushstring(L_, "selfdestruct");                                                   // L_: ud gc_cb name status
             lua_call(L_, 2, 0);                                                                    // L_: ud
@@ -901,7 +906,21 @@ Lane::~Lane()
 
 // #################################################################################################
 
-CancelResult Lane::cancel(CancelOp const op_, int const hookCount_, std::chrono::time_point<std::chrono::steady_clock> const until_, bool const wakeLane_)
+void Lane::applyDebugName() const
+{
+    if constexpr (HAVE_DECODA_SUPPORT()) {
+        // to see VM name in Decoda debugger Virtual Machine window
+        luaG_pushstring(L, debugName);                                                             // L: ... "name"
+        lua_setglobal(L, "decoda_name");                                                           // L: ...
+    }
+    // and finally set the OS thread name
+    THREAD_SETNAME(debugName);
+}
+
+// #################################################################################################
+
+[[nodiscard]]
+CancelResult Lane::cancel(CancelOp const op_, std::chrono::time_point<std::chrono::steady_clock> const until_, WakeLane const wakeLane_, int const hookCount_)
 {
     // this is a hook installed with lua_sethook: can't capture anything to be convertible to lua_Hook
     static constexpr lua_Hook _cancelHook{
@@ -915,79 +934,43 @@ CancelResult Lane::cancel(CancelOp const op_, int const hookCount_, std::chrono:
     };
 
     // remember that lanes are not transferable: only one thread can cancel a lane, so no multithreading issue here
-    // We can read 'lane_->status' without locks, but not wait for it (if Posix no PTHREAD_TIMEDJOIN)
-    if (status >= Lane::Done) {
+    // We can read status without locks, but not wait for it (if Posix no PTHREAD_TIMEDJOIN)
+    if (status.load(std::memory_order_acquire) >= Lane::Done) {
         // say "ok" by default, including when lane is already done
         return CancelResult::Cancelled;
     }
 
-    // signal the linda the wake up the thread so that it can react to the cancel query
+    // signal the linda to wake up the thread so that it can react to the cancel query
     // let us hope we never land here with a pointer on a linda that has been destroyed...
-    if (op_ == CancelOp::Soft) {
-        return cancelSoft(until_, wakeLane_);
-    } else if (static_cast<int>(op_) > static_cast<int>(CancelOp::Soft)) {
-        lua_sethook(L, _cancelHook, static_cast<int>(op_), hookCount_);
+    if (op_.mode == CancelRequest::Soft) {
+        return internalCancel(CancelRequest::Soft, until_, wakeLane_);
+    } else if (op_.hookMask != LuaHookMask::None) {
+        lua_sethook(L, _cancelHook, static_cast<int>(op_.hookMask), hookCount_);
+        // TODO: maybe we should wake the lane here too, because the hook won't do much if the lane is blocked on a linda
     }
 
-    return cancelHard(until_, wakeLane_);
+    return internalCancel(CancelRequest::Hard, until_, wakeLane_);
 }
 
 // #################################################################################################
 
-[[nodiscard]] CancelResult Lane::cancelHard(std::chrono::time_point<std::chrono::steady_clock> const until_, bool const wakeLane_)
+[[nodiscard]]
+CancelResult Lane::internalCancel(CancelRequest const rq_, std::chrono::time_point<std::chrono::steady_clock> const until_, WakeLane const wakeLane_)
 {
-    cancelRequest = CancelRequest::Hard; // it's now signaled to stop
-    // lane_->thread.get_stop_source().request_stop();
-    if (wakeLane_) { // wake the thread so that execution returns from any pending linda operation if desired
-        std::condition_variable* const _waiting_on{ waiting_on };
-        if (status == Lane::Waiting && _waiting_on != nullptr) {
-            _waiting_on->notify_all();
+    cancelRequest.store(rq_, std::memory_order_relaxed); // it's now signaled to stop
+    if (rq_ == CancelRequest::Hard) {
+        // lane_->thread.get_stop_source().request_stop();
+    }
+    if (wakeLane_ == WakeLane::Yes) { // wake the thread so that execution returns from any pending linda operation if desired
+        if (status.load(std::memory_order_acquire) == Lane::Waiting) { // waiting_on is updated under control of status acquire/release semantics
+            if (std::condition_variable* const _waiting_on{ waiting_on }) {
+                _waiting_on->notify_all();
+            }
         }
     }
     // wait until the lane stops working with its state (either Suspended or Done+)
-    CancelResult result{ waitForCompletion(until_) ? CancelResult::Cancelled : CancelResult::Timeout };
+    CancelResult const result{ waitForCompletion(until_) ? CancelResult::Cancelled : CancelResult::Timeout };
     return result;
-}
-
-// #################################################################################################
-
-[[nodiscard]] CancelResult Lane::cancelSoft(std::chrono::time_point<std::chrono::steady_clock> const until_, bool const wakeLane_)
-{
-    cancelRequest = CancelRequest::Soft; // it's now signaled to stop
-    // negative timeout: we don't want to truly abort the lane, we just want it to react to cancel_test() on its own
-    if (wakeLane_) { // wake the thread so that execution returns from any pending linda operation if desired
-        std::condition_variable* const _waiting_on{ waiting_on };
-        if (status == Lane::Waiting && _waiting_on != nullptr) {
-            _waiting_on->notify_all();
-        }
-    }
-
-    // wait until the lane stops working with its state (either Suspended or Done+)
-    return waitForCompletion(until_) ? CancelResult::Cancelled : CancelResult::Timeout;
-}
-
-// #################################################################################################
-
-void Lane::changeDebugName(StackIndex const nameIdx_)
-{
-    StackIndex const _nameIdx{ luaG_absindex(L, nameIdx_) };
-    luaL_checktype(L, _nameIdx, LUA_TSTRING);                                                      // L: ... "name" ...
-    STACK_CHECK_START_REL(L, 0);
-    // store a hidden reference in the registry to make sure the string is kept around even if a lane decides to manually change the "decoda_name" global...
-    kLaneNameRegKey.setValue(L, [idx = _nameIdx](lua_State* L_) { lua_pushvalue(L_, idx); });      // L: ... "name" ...
-    // keep a direct pointer on the string
-    {
-        std::lock_guard<std::mutex> _guard{ debugNameMutex };
-    debugName = luaG_tostring(L, _nameIdx);
-    }
-    if constexpr (HAVE_DECODA_SUPPORT()) {
-        // to see VM name in Decoda debugger Virtual Machine window
-        lua_pushvalue(L, _nameIdx);                                                                // L: ... "name" ... "name"
-        lua_setglobal(L, "decoda_name");                                                           // L: ... "name" ...
-    }
-    // and finally set the OS thread name
-    THREAD_SETNAME(debugName.data());
-    STACK_CHECK(L, 0);
 }
 
 // #################################################################################################
@@ -1002,7 +985,8 @@ void Lane::changeDebugName(StackIndex const nameIdx_)
 //                   / "error"     finished at an error, error value is there
 //                   / "cancelled"   execution cancelled by M (state gone)
 //
-[[nodiscard]] std::string_view Lane::errorTraceLevelString() const
+[[nodiscard]]
+std::string_view Lane::errorTraceLevelString() const
 {
     std::string_view const _str{
         (errorTraceLevel == ErrorTraceLevel::Minimal) ? "minimal" :
@@ -1022,21 +1006,21 @@ namespace {
             { "__close", LG_lane_close },
 #endif // LUA_VERSION_NUM >= 504
             { "__gc", LG_lane_gc },
-            { "__index", LG_thread_index },
-            { "cancel", LG_thread_cancel },
-            { "get_threadname", LG_get_threadname },
-            { "join", LG_thread_join },
-            { "resume", LG_thread_resume },
+            { "__index", LG_lane_index },
+            { "cancel", LG_lane_cancel },
+            { "get_threadname", LG_lane_get_threadname },
+            { "join", LG_lane_join },
+            { "resume", LG_lane_resume },
             { nullptr, nullptr }
         };
     } // namespace local
 } // namespace
 
   // contains keys: { __close, __gc, __index, kCachedError, kCachedTostring, cancel, get_threadname, join }
-void Lane::PushMetatable(lua_State* L_)
+void Lane::PushMetatable(lua_State* const L_)
 {
     STACK_CHECK_START_REL(L_, 0);
-    if (luaL_newmetatable(L_, kLaneMetatableName)) {                                               // L_: mt
+    if (luaL_newmetatable(L_, kLaneMetatableName.data())) {                                        // L_: mt
         luaG_registerlibfuncs(L_, local::sLaneFunctions);
         // cache error() and tostring()
         kCachedError.pushKey(L_);                                                                  // L_: mt kCachedError
@@ -1054,7 +1038,7 @@ void Lane::PushMetatable(lua_State* L_)
 
 // #################################################################################################
 
-void Lane::pushStatusString(lua_State* L_) const
+void Lane::pushStatusString(lua_State* const L_) const
 {
     std::string_view const _str{ threadStatusString() };
     LUA_ASSERT(L_, !_str.empty());
@@ -1070,8 +1054,8 @@ void Lane::pushIndexedResult(lua_State* const L_, int const key_) const
     LUA_ASSERT(L_, ToLane(L_, kIdxSelf) == this);                                                  // L_: lane ...
     STACK_GROW(L_, 3);
 
-    lua_getiuservalue(L_, kIdxSelf, 1);                                                            // L_: lane ... {uv}
-    if (status != Lane::Error) {
+    lua_getiuservalue(L_, kIdxSelf, UserValueIndex{ 1 });                                          // L_: lane ... {uv}
+    if (status.load(std::memory_order_acquire) != Lane::Error) {
         lua_rawgeti(L_, -1, key_);                                                                 // L_: lane ... {uv} uv[i]
         lua_remove(L_, -2);                                                                        // L_: lane ... uv[i]
         return;
@@ -1117,7 +1101,8 @@ void Lane::pushIndexedResult(lua_State* const L_, int const key_) const
 
 // #################################################################################################
 
-[[nodiscard]] std::string_view Lane::pushErrorTraceLevel(lua_State* L_) const
+[[nodiscard]]
+std::string_view Lane::pushErrorTraceLevel(lua_State* L_) const
 {
     std::string_view const _str{ errorTraceLevelString() };
     LUA_ASSERT(L_, !_str.empty());
@@ -1138,7 +1123,7 @@ void Lane::resetResultsStorage(lua_State* const L_, StackIndex const self_idx_)
     // create the new table
     lua_newtable(L_);                                                                              // L_: ... self ... {}
     // get the current table
-    lua_getiuservalue(L_, _self_idx, 1);                                                           // L_: ... self ... {} {uv}
+    lua_getiuservalue(L_, _self_idx, UserValueIndex{ 1 });                                         // L_: ... self ... {} {uv}
     LUA_ASSERT(L_, lua_istable(L_, -1));
     // read gc_cb from the current table
     kLaneGC.pushKey(L_);                                                                           // L_: ... self ... {} {uv} kLaneGC
@@ -1149,7 +1134,7 @@ void Lane::resetResultsStorage(lua_State* const L_, StackIndex const self_idx_)
     // we can forget the old table
     lua_pop(L_, 1);                                                                                // L_: ... self ... {}
     // and store the new one
-    lua_setiuservalue(L_, _self_idx, 1);                                                           // L_: ... self ...
+    lua_setiuservalue(L_, _self_idx, UserValueIndex{ 1 });                                         // L_: ... self ...
     STACK_CHECK(L_, 0);
 }
 
@@ -1161,7 +1146,7 @@ void Lane::securizeDebugName(lua_State* const L_)
     STACK_CHECK_START_REL(L_, 0);
     STACK_GROW(L_, 3);
     // a Lane's uservalue should be a table
-    lua_getiuservalue(L_, StackIndex{ 1 }, 1);                                                     // L_: lane ... {uv}
+    lua_getiuservalue(L_, StackIndex{ 1 }, UserValueIndex{ 1 });                                   // L_: lane ... {uv}
     LUA_ASSERT(L_, lua_istable(L_, -1));
     // we don't care about the actual key, so long as it's unique and can't collide with anything.
     lua_newtable(L_);                                                                              // L_: lane ... {uv} {}
@@ -1186,6 +1171,24 @@ void Lane::startThread(int const priority_)
 
 // #################################################################################################
 
+void Lane::storeDebugName(std::string_view const& name_)
+{
+    STACK_CHECK_START_REL(L, 0);
+    // store a hidden reference in the registry to make sure the string is kept around even if a lane decides to manually change the "decoda_name" global...
+    kLaneNameRegKey.setValue(L, [name = name_](lua_State* L_) { luaG_pushstring(L_, name); });
+    STACK_CHECK(L, 0);
+    kLaneNameRegKey.pushValue(L);                                                                       // L: ... "name" ...
+    // keep a direct view on the stored string
+    {
+        std::lock_guard<std::mutex> _guard{ debugNameMutex };
+        debugName = luaG_tostring(L, kIdxTop);
+    }
+    lua_pop(L, 1);
+    STACK_CHECK(L, 0);
+}
+
+// #################################################################################################
+
 // take the results on the lane state stack and store them in our uservalue table, at numeric indices:
 // t[0] = nresults
 // t[i] = result #i
@@ -1195,7 +1198,7 @@ int Lane::storeResults(lua_State* const L_)
     LUA_ASSERT(L_, ToLane(L_, kIdxSelf) == this);
 
     STACK_CHECK_START_REL(L_, 0);
-    lua_getiuservalue(L_, kIdxSelf, 1);                                                            // L_: lane ... {uv}
+    lua_getiuservalue(L_, kIdxSelf, UserValueIndex{ 1 });                                          // L_: lane ... {uv}
     StackIndex const _tidx{ lua_gettop(L_) };
 
     int _stored{};
@@ -1207,7 +1210,7 @@ int Lane::storeResults(lua_State* const L_)
         return _stored;
     }
 
-    switch (status) {
+    switch (status.load(std::memory_order_acquire)) {
     default:
         // this is an internal error, we probably never get here
         lua_settop(L_, 0);                                                                         // L_:
@@ -1271,7 +1274,7 @@ int Lane::storeResults(lua_State* const L_)
     STACK_CHECK(L_, 0);
     LUA_ASSERT(L_, lua_gettop(L) == 0 && nresults == 0);
     // if we are suspended, all we want to do is gather the current yielded values
-    if (status != Lane::Suspended) {
+    if (status.load(std::memory_order_acquire) != Lane::Suspended) {
         // debugName is a pointer to string possibly interned in the lane's state, that no longer exists when the state is closed
         // so store it in the userdata uservalue at a key that can't possibly collide
         securizeDebugName(L_);
@@ -1297,7 +1300,8 @@ int Lane::storeResults(lua_State* const L_)
 // "error"     finished at an error, error value is there
 // "cancelled" execution cancelled (state gone)
 //
-[[nodiscard]] std::string_view Lane::threadStatusString() const
+[[nodiscard]]
+std::string_view Lane::threadStatusString() const
 {
     static constexpr std::string_view kStrs[] = {
         "pending",
@@ -1313,7 +1317,7 @@ int Lane::storeResults(lua_State* const L_)
     static_assert(5 == static_cast<std::underlying_type_t<Lane::Status>>(Done));
     static_assert(6 == static_cast<std::underlying_type_t<Lane::Status>>(Error));
     static_assert(7 == static_cast<std::underlying_type_t<Lane::Status>>(Cancelled));
-    auto const _status{ static_cast<std::underlying_type_t<Lane::Status>>(status) };
+    auto const _status{ static_cast<std::underlying_type_t<Lane::Status>>(status.load(std::memory_order_acquire)) };
     if (_status < 0 || _status > 7) { // should never happen, but better safe than sorry
         return "";
     }
@@ -1329,5 +1333,10 @@ bool Lane::waitForCompletion(std::chrono::time_point<std::chrono::steady_clock> 
     // return doneCondVar.wait_until(lock, token, secs_, [this](){ return status >= Lane::Done; });
 
     // wait until the lane stops working with its state (either Suspended or Done+)
-    return doneCondVar.wait_until(_guard, until_, [this]() { return status == Lane::Suspended || status >= Lane::Done; });
+    return doneCondVar.wait_until(_guard, until_, [this]()
+        {
+            auto const _status{ status.load(std::memory_order_acquire) };
+            return _status == Lane::Suspended || _status >= Lane::Done;
+        }
+    );
 }

@@ -28,14 +28,15 @@ THE SOFTWARE.
 ===============================================================================
 */
 
-#include "_pch.h"
-#include "universe.h"
+#include "_pch.hpp"
+#include "universe.hpp"
 
-#include "deep.h"
-#include "intercopycontext.h"
-#include "keeper.h"
-#include "lane.h"
-#include "state.h"
+#include "deep.hpp"
+#include "intercopycontext.hpp"
+#include "keeper.hpp"
+#include "lane.hpp"
+#include "linda.hpp"
+#include "state.hpp"
 
 extern LUAG_FUNC(linda);
 
@@ -90,7 +91,7 @@ void Universe::callOnStateCreate(lua_State* const L_, lua_State* const from_, Lo
             
         // C function: recreate a closure in the new state, bypassing the lookup scheme
         lua_pushcfunction(L_, std::get<lua_CFunction>(onStateCreateFunc));                         // on_state_create()
-    } else { // Lua function located in the config table, copied when we opened "lanes.core"
+    } else { // Lua function located in the config table, copied when we opened "lanes_core"
         LUA_ASSERT(from_, std::holds_alternative<uintptr_t>(onStateCreateFunc));
         if (mode_ != LookupMode::LaneBody) {
             // if attempting to call in a keeper state, do nothing because the function doesn't exist there
@@ -119,7 +120,8 @@ void Universe::callOnStateCreate(lua_State* const L_, lua_State* const from_, Lo
 // #################################################################################################
 
 // only called from the master state
-[[nodiscard]] Universe* Universe::Create(lua_State* const L_)
+[[nodiscard]]
+Universe* Universe::Create(lua_State* const L_)
 {
     LUA_ASSERT(L_, Universe::Get(L_) == nullptr);
     static constexpr StackIndex kIdxSettings{ 1 };
@@ -146,7 +148,7 @@ void Universe::callOnStateCreate(lua_State* const L_, lua_State* const from_, Lo
     DEBUGSPEW_CODE(DebugSpewIndentScope _scope{ _U });
     lua_createtable(L_, 0, 1);                                                                     // L_: settings universe {mt}
     std::ignore = luaG_getfield(L_, kIdxSettings, "shutdown_timeout");                             // L_: settings universe {mt} shutdown_timeout
-    lua_pushcclosure(L_, LG_universe_gc, 1);                                                       // L_: settings universe {mt} LG_universe_gc
+    lua_pushcclosure(L_, UniverseGC, 1);                                                           // L_: settings universe {mt} UniverseGC
     lua_setfield(L_, -2, "__gc");                                                                  // L_: settings universe {mt}
     lua_setmetatable(L_, -2);                                                                      // L_: settings universe
     lua_pop(L_, 1);                                                                                // L_: settings
@@ -170,22 +172,11 @@ void Universe::callOnStateCreate(lua_State* const L_, lua_State* const from_, Lo
     _U->selfdestructFirst = SELFDESTRUCT_END;
     _U->initializeAllocatorFunction(L_);
     _U->initializeOnStateCreate(L_);
-    _U->keepers.initialize(*_U, L_, _nbUserKeepers, _keepers_gc_threshold);
+    _U->keepers.initialize(*_U, L_, static_cast<size_t>(_nbUserKeepers), _keepers_gc_threshold);
     STACK_CHECK(L_, 0);
 
     // Initialize 'timerLinda'; a common Linda object shared by all states
-    lua_pushcfunction(L_, LG_linda);                                                               // L_: settings lanes.linda
-    luaG_pushstring(L_, "lanes-timer");                                                            // L_: settings lanes.linda "lanes-timer"
-    lua_pushinteger(L_, 0);                                                                        // L_: settings lanes.linda "lanes-timer" 0
-    lua_call(L_, 2, 1);                                                                            // L_: settings linda
-    STACK_CHECK(L_, 1);
-
-    // Proxy userdata contents is only a 'DeepPrelude*' pointer
-    _U->timerLinda = *luaG_tofulluserdata<DeepPrelude*>(L_, kIdxTop);
-    // increment refcount so that this linda remains alive as long as the universe exists.
-    _U->timerLinda->refcount.fetch_add(1, std::memory_order_relaxed);
-    lua_pop(L_, 1);                                                                                // L_: settings
-    STACK_CHECK(L_, 0);
+    _U->timerLinda = Linda::CreateTimerLinda(L_, PK);
     return _U;
 }
 
@@ -194,7 +185,8 @@ void Universe::callOnStateCreate(lua_State* const L_, lua_State* const from_, Lo
 // #################################################################################################
 
 // same as PUC-Lua l_alloc
-[[nodiscard]] static void* libc_lua_Alloc([[maybe_unused]] void* ud_, [[maybe_unused]] void* ptr_, [[maybe_unused]] size_t osize_, size_t nsize_)
+[[nodiscard]]
+static void* libc_lua_Alloc([[maybe_unused]] void* const ud_, [[maybe_unused]] void* const ptr_, [[maybe_unused]] size_t const osize_, size_t const nsize_)
 {
     if (nsize_ == 0) {
         free(ptr_);
@@ -206,7 +198,8 @@ void Universe::callOnStateCreate(lua_State* const L_, lua_State* const from_, Lo
 
 // #################################################################################################
 
-[[nodiscard]] static int luaG_provide_protected_allocator(lua_State* const L_)
+[[nodiscard]]
+static int luaG_provide_protected_allocator(lua_State* const L_)
 {
     Universe* const _U{ Universe::Get(L_) };
     // push a new full userdata on the stack, giving access to the universe's protected allocator
@@ -263,7 +256,7 @@ void Universe::initializeAllocatorFunction(lua_State* const L_)
     LUA_ASSERT(L_, lua_isstring(L_, kIdxTop)); // should be the case due to lanes.lua parameter validation
     std::string_view const _allocator{ luaG_tostring(L_, kIdxTop) };
     if (_allocator == "libc") {
-        internalAllocator = lanes::AllocatorDefinition{ lanes::AllocatorDefinition::kAllocatorVersion, libc_lua_Alloc, nullptr };
+        internalAllocator = lanes::AllocatorDefinition{ libc_lua_Alloc, nullptr };
     } else {
         // use whatever the provider provides
         internalAllocator = resolveAllocator(L_, "internal");
@@ -338,11 +331,8 @@ lanes::AllocatorDefinition Universe::resolveAllocator(lua_State* const L_, std::
     lua_pushcclosure(L_, provideAllocator, 0);                                                     // L_: provideAllocator()
     luaG_pushstring(L_, hint_);                                                                    // L_: provideAllocator() "<hint>"
     lua_call(L_, 1, 1);                                                                            // L_: result
-    lanes::AllocatorDefinition* const _def{ luaG_tofulluserdata<lanes::AllocatorDefinition>(L_, kIdxTop) };
-    if (!_def || _def->version != lanes::AllocatorDefinition::kAllocatorVersion) {
-        raise_luaL_error(L_, "Bad config.allocator function, must provide a valid AllocatorDefinition");
-    }
-    _ret = *_def;
+    // make sure we have a valid AllocatorDefinition on the stack (an error is raised instead if it is not the case)
+    _ret = lanes::AllocatorDefinition::Validated(L_, kIdxTop);
     lua_pop(L_, 1);                                                                                // L_:
     STACK_CHECK(L_, 0);
     return _ret;
@@ -362,7 +352,7 @@ bool Universe::terminateFreeRunningLanes(lua_Duration const shutdownTimeout_, Ca
                 // if waiting on a linda, they will raise a cancel_error.
                 // if a cancellation hook is desired, it will be installed to try to raise an error
                 if (_lane->thread.joinable()) {
-                    std::ignore = _lane->cancel(op_, 1, std::chrono::steady_clock::now() + 1us, true);
+                    std::ignore = _lane->cancel(op_, std::chrono::steady_clock::now() + 1us, WakeLane::Yes, 1);
                 }
                 _lane = _lane->selfdestruct_next;
             }
@@ -381,7 +371,7 @@ bool Universe::terminateFreeRunningLanes(lua_Duration const shutdownTimeout_, Ca
                     std::lock_guard<std::mutex> _guard{ selfdestructMutex };
                     Lane* _lane{ selfdestructFirst };
                     while (_lane != SELFDESTRUCT_END) {
-                        if (_lane->cancelRequest != CancelRequest::None)
+                        if (_lane->cancelRequest.load(std::memory_order_relaxed) != CancelRequest::None)
                             ++_n;
                         _lane = _lane->selfdestruct_next;
                     }
@@ -409,7 +399,7 @@ bool Universe::terminateFreeRunningLanes(lua_Duration const shutdownTimeout_, Ca
 // #################################################################################################
 
 // process end: cancel any still free-running threads
-LUAG_FUNC(universe_gc)
+int Universe::UniverseGC(lua_State* const L_)
 {
     lua_Duration const _shutdown_timeout{ lua_tonumber(L_, lua_upvalueindex(1)) };
     STACK_CHECK_START_ABS(L_, 1);
@@ -417,9 +407,9 @@ LUAG_FUNC(universe_gc)
 
     // attempt to terminate all lanes with increasingly stronger cancel methods
     bool const _allLanesTerminated{ 
-        _U->terminateFreeRunningLanes(_shutdown_timeout, CancelOp::Soft)
-        || _U->terminateFreeRunningLanes(_shutdown_timeout, CancelOp::Hard)
-        || _U->terminateFreeRunningLanes(_shutdown_timeout, CancelOp::MaskAll)
+        _U->terminateFreeRunningLanes(_shutdown_timeout, { CancelRequest::Soft, LuaHookMask::None })
+        || _U->terminateFreeRunningLanes(_shutdown_timeout, { CancelRequest::Hard, LuaHookMask::None })
+        || _U->terminateFreeRunningLanes(_shutdown_timeout, { CancelRequest::Hard, LuaHookMask::All })
     };
 
     // invoke the function installed by lanes.finally()
@@ -444,12 +434,7 @@ LUAG_FUNC(universe_gc)
     }
 
     // no need to mutex-protect this as all lanes in the universe are gone at that point
-    if (_U->timerLinda != nullptr) { // test in case some early internal error prevented Lanes from creating the deep timer
-        [[maybe_unused]] int const _prev_ref_count{ _U->timerLinda->refcount.fetch_sub(1, std::memory_order_relaxed) };
-        LUA_ASSERT(L_, _prev_ref_count == 1); // this should be the last reference
-        DeepFactory::DeleteDeepObject(L_, _U->timerLinda);
-        _U->timerLinda = nullptr;
-    }
+    Linda::DeleteTimerLinda(L_, std::exchange(_U->timerLinda, nullptr), PK);
 
     _U->keepers.close();
 

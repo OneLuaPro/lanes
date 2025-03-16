@@ -102,7 +102,7 @@ set(INSTALL_DATAROOTDIR
   ${CMAKE_INSTALL_DATAROOTDIR} CACHE PATH "Installation directory for data")
 # Redefine original install dirs for OneLuaPro
 set(INSTALL_CMOD
-  ${INSTALL_LIBDIR}/lua/${liblua_VERSION_MAJOR}.${liblua_VERSION_MINOR}/lanes
+  ${INSTALL_LIBDIR}/lua/${liblua_VERSION_MAJOR}.${liblua_VERSION_MINOR}
   CACHE PATH "Directory to install Lua binary modules.")
 set(INSTALL_LMOD
   ${INSTALL_DATAROOTDIR}/lua/${liblua_VERSION_MAJOR}.${liblua_VERSION_MINOR}

@@ -106,7 +106,7 @@ class Universe final
     LaneTracker tracker;
 
     // Protects modifying the selfdestruct chain
-    std::mutex selfdestructMutex;
+    mutable std::mutex selfdestructMutex;
 
     // require() serialization
     std::recursive_mutex requireMutex;
@@ -126,6 +126,7 @@ class Universe final
 
     private:
     static int UniverseGC(lua_State* L_);
+    void flagDanglingLanes() const;
 
     public:
     [[nodiscard]]
@@ -150,7 +151,7 @@ class Universe final
     static int InitializeFinalizer(lua_State* L_);
     void initializeOnStateCreate(lua_State* L_);
     [[nodiscard]]
-    lanes::AllocatorDefinition resolveAllocator(lua_State* L_, std::string_view const& hint_) const;
+    lanes::AllocatorDefinition resolveAndValidateAllocator(lua_State* L_, std::string_view const& hint_) const;
     static inline void Store(lua_State* L_, Universe* U_);
     [[nodiscard]]
     bool terminateFreeRunningLanes(lua_Duration shutdownTimeout_, CancelOp op_);

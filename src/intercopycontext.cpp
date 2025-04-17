@@ -770,7 +770,7 @@ bool InterCopyContext::tryCopyClonable() const
     // we need to copy over the uservalues of the userdata as well
     {
         StackIndex const _mt{ luaG_absindex(L1, StackIndex{ -2 }) };                               // L1: ... mt __lanesclone
-        size_t const userdata_size{ lua_rawlen(L1, _L1_i) };
+        auto const userdata_size{ static_cast<size_t>(lua_rawlen(L1, _L1_i)) }; // make 32-bits builds happy
         // extract all the uservalues, but don't transfer them yet
         UserValueCount const _nuv{ luaG_getalluservalues(L1, _L1_i) };                             // L1: ... mt __lanesclone [uv]*
         // create the clone userdata with the required number of uservalue slots
@@ -930,7 +930,7 @@ bool InterCopyContext::interCopyFunction() const
         _source = lua_touserdata(L1, -1);
         void* _clone{ nullptr };
         // get the number of bytes to allocate for the clone
-        size_t const _userdata_size{ lua_rawlen(L1, kIdxTop) };
+        auto const _userdata_size{ static_cast<size_t>(lua_rawlen(L1, kIdxTop)) };  // make 32-bits builds happy
         {
             // extract uservalues (don't transfer them yet)
             UserValueCount const _nuv{ luaG_getalluservalues(L1, source_i) };                      // L1: ... u [uv]*
@@ -994,7 +994,7 @@ bool InterCopyContext::interCopyLightuserdata() const
     // recognize and print known UniqueKey names here
     if constexpr (USE_DEBUG_SPEW()) {
         bool _found{ false };
-        static constexpr std::array<std::reference_wrapper<UniqueKey const>, 3> kKeysToCheck{ kLindaBatched, kCancelError, kNilSentinel };
+        static constexpr std::array<std::reference_wrapper<UniqueKey const>, 2> kKeysToCheck{ kCancelError, kNilSentinel };
         for (UniqueKey const& _key : kKeysToCheck) {
             if (_key.equals(L1, L1_i)) {
                 DEBUGSPEW_CODE(DebugSpew(nullptr) << _key.debugName);

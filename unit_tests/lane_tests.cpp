@@ -320,7 +320,7 @@ TEST_CASE("lane.cancel")
 // so let's create a separate test case for each file with an ugly macro...
 
 #define MAKE_TEST_CASE(DIR, FILE, CONDITION)\
-TEST_CASE("scripted tests." #DIR "." #FILE) \
+TEST_CASE("scripted_tests." #DIR "." #FILE) \
 { \
     FileRunner _runner(R"(.\unit_tests\scripts)"); \
     _runner.performTest(FileRunnerParam{ #DIR "/" #FILE, TestType::CONDITION }); \
@@ -332,6 +332,7 @@ MAKE_TEST_CASE(lane, cooperative_shutdown, AssertNoLuaError)
 MAKE_TEST_CASE(lane, uncooperative_shutdown, AssertWarns)
 #endif // LUA_VERSION_NUM
 MAKE_TEST_CASE(lane, tasking_basic, AssertNoLuaError)
+MAKE_TEST_CASE(lane, tasking_cancelling_with_hook, AssertNoLuaError)
 MAKE_TEST_CASE(lane, tasking_cancelling, AssertNoLuaError)
 MAKE_TEST_CASE(lane, tasking_comms_criss_cross, AssertNoLuaError)
 MAKE_TEST_CASE(lane, tasking_communications, AssertNoLuaError)
@@ -346,12 +347,13 @@ MAKE_TEST_CASE(coro, error_handling, AssertNoLuaError)
 #endif // LUAJIT_FLAVOR()
 
 /*
-TEST_CASE("lanes.scripted tests")
+TEST_CASE("lanes.scripted_tests")
 {
     auto const& _testParam = GENERATE(
         FileRunnerParam{ PUC_LUA_ONLY("lane/cooperative_shutdown"), TestType::AssertNoLuaError }, // 0
         FileRunnerParam{ "lane/uncooperative_shutdown", TestType::AssertWarns },
         FileRunnerParam{ "lane/tasking_basic", TestType::AssertNoLuaError }, // 2
+        FileRunnerParam{ "lane/tasking_cancelling_with_hook", TestType::AssertNoLuaError }, // 3
         FileRunnerParam{ "lane/tasking_cancelling", TestType::AssertNoLuaError }, // 3
         FileRunnerParam{ "lane/tasking_comms_criss_cross", TestType::AssertNoLuaError }, // 4
         FileRunnerParam{ "lane/tasking_communications", TestType::AssertNoLuaError },

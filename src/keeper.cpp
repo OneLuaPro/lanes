@@ -104,6 +104,7 @@ class KeyUD final
 
 // #################################################################################################
 
+[[nodiscard]]
 bool KeyUD::changeLimit(LindaLimit const limit_)
 {
     bool const _newSlackAvailable{
@@ -127,6 +128,7 @@ LindaRestrict KeyUD::changeRestrict(LindaRestrict const restrict_)
 
 // in: nothing
 // out: { first = 1, count = 0, limit = -1}
+[[nodiscard]]
 KeyUD* KeyUD::Create(KeeperState const K_)
 {
     STACK_GROW(K_, 2);
@@ -141,6 +143,7 @@ KeyUD* KeyUD::Create(KeeperState const K_)
 
 // #################################################################################################
 
+[[nodiscard]]
 KeyUD* KeyUD::GetPtr(KeeperState const K_, StackIndex const idx_)
 {
     return luaG_tofulluserdata<KeyUD>(K_, idx_);
@@ -181,6 +184,7 @@ void KeyUD::peek(KeeperState const K_, int const count_) const
 
 // in: fifo
 // out: remove the fifo table from the stack, push as many items as required on the stack (function assumes they exist in sufficient number)
+[[nodiscard]]
 int KeyUD::pop(KeeperState const K_, int const minCount_, int const maxCount_)
 {
     if (count < minCount_) {
@@ -191,23 +195,33 @@ int KeyUD::pop(KeeperState const K_, int const minCount_, int const maxCount_)
     int const _popCount{ std::min(count, maxCount_) };
     LUA_ASSERT(K_, KeyUD::GetPtr(K_, kIdxTop) == this);                                            // K_: ... this
     prepareAccess(K_, kIdxTop);                                                                    // K_: ... fifo
+
+    STACK_CHECK_START_REL(K_, 0);
     StackIndex const _fifo_idx{ lua_gettop(K_) };
     // each iteration pushes a value on the stack!
     STACK_GROW(K_, _popCount + 2);
-    // skip first item, we will push it last
-    for (int const _i : std::ranges::iota_view{ 1, _popCount }) {
+
+    // remove an element from fifo sequence and push it on the stack
+    auto _extractFifoItem = [K = K_, first = first, fifo_idx = lua_gettop(K_)](int const _i)
+    {
+        STACK_CHECK_START_REL(K, 0);
         int const _at{ first + _i };
         // push item on the stack
-        lua_rawgeti(K_, _fifo_idx, _at);                                                           // K_: ... fifo val
+        lua_rawgeti(K, fifo_idx, _at);                                                             // K_: ... fifo val
         // remove item from the fifo
-        lua_pushnil(K_);                                                                           // K_: ... fifo val nil
-        lua_rawseti(K_, _fifo_idx, _at);                                                           // K_: ... fifo val
+        lua_pushnil(K);                                                                            // K_: ... fifo val nil
+        lua_rawseti(K, fifo_idx, _at);                                                             // K_: ... fifo val
+        STACK_CHECK(K, 1);
+    };
+
+    // skip first item, we will push it last to avoid shifting the whole stack when removing 'fifo'
+    for (int const _i : std::ranges::iota_view{ 1, _popCount }) {
+        _extractFifoItem(_i);                                                                      // K_: ... fifo val1...valN
     }
     // now process first item
-    lua_rawgeti(K_, _fifo_idx, first);                                                             // K_: ... fifo vals val
-    lua_pushnil(K_);                                                                               // K_: ... fifo vals val nil
-    lua_rawseti(K_, _fifo_idx, first);                                                             // K_: ... fifo vals val
-    lua_replace(K_, _fifo_idx);                                                                    // K_: ... vals
+    _extractFifoItem(0);                                                                           // K_: ... fifo val1...valN val0
+    STACK_CHECK(K_, _popCount);
+    lua_replace(K_, _fifo_idx);                                                                    // K_: ... val0...valN
 
     // avoid ever-growing indexes by resetting each time we detect the fifo is empty
     int const _new_count{ count - _popCount };
@@ -233,6 +247,7 @@ void KeyUD::prepareAccess(KeeperState const K_, StackIndex const idx_) const
 
 // in: expect this val... on top of the stack
 // out: nothing, removes all pushed values from the stack
+[[nodiscard]]
 bool KeyUD::push(KeeperState const K_, int const count_, bool const enforceLimit_)
 {
     StackIndex const _fifoIdx{ luaG_absindex(K_, StackIndex{ -1 - count_ }) };
@@ -262,7 +277,7 @@ void KeyUD::pushFillStatus(KeeperState const K_) const
         luaG_pushstring(K_, kUnder);
         return;
     }
-    int const _delta{limit - count};
+    int const _delta{ limit - count };
     if (_delta < 0) {
         luaG_pushstring(K_, kOver);
     } else if (_delta > 0) {
@@ -285,7 +300,10 @@ void KeyUD::PushFillStatus(KeeperState const K_, KeyUD const* const key_)
 
 // #################################################################################################
 
-// expects 'this' on top of the stack
+// in: expects 'this' on top of the stack
+// out: nothing
+// returns true if the channel was full
+[[nodiscard]]
 bool KeyUD::reset(KeeperState const K_)
 {
     LUA_ASSERT(K_, KeyUD::GetPtr(K_, kIdxTop) == this);
@@ -337,6 +355,7 @@ static void PushKeysDB(KeeperState const K_, StackIndex const idx_)
 
 // in: linda
 // out: nothing
+[[nodiscard]]
 int keepercall_collectgarbage(lua_State* const L_)
 {
     lua_gc(L_, LUA_GCCOLLECT, 0);
@@ -346,6 +365,7 @@ int keepercall_collectgarbage(lua_State* const L_)
 // #################################################################################################
 
 // in: linda [, key [, ...]]
+[[nodiscard]]
 int keepercall_count(lua_State* const L_)
 {
     KeeperState const _K{ L_ };
@@ -409,6 +429,7 @@ int keepercall_count(lua_State* const L_)
 
 // in: linda
 // not part of the linda public API, only used for cleanup at linda GC
+[[nodiscard]]
 int keepercall_destruct(lua_State* const L_)
 {
     STACK_GROW(L_, 3);
@@ -427,6 +448,7 @@ int keepercall_destruct(lua_State* const L_)
 
 // in: linda_ud key [count]
 // out: N <N values>|kRestrictedChannel
+[[nodiscard]]
 int keepercall_get(lua_State* const L_)
 {
     KeeperState const _K{ L_ };
@@ -461,6 +483,7 @@ int keepercall_get(lua_State* const L_)
 
 // in: linda key [n|nil]
 // out: boolean, <fill status: string>
+[[nodiscard]]
 int keepercall_limit(lua_State* const L_)
 {
     KeeperState const _K{ L_ };
@@ -504,6 +527,7 @@ int keepercall_limit(lua_State* const L_)
 
 // in: linda, key [, key]?
 // out: (key, val) or nothing
+[[nodiscard]]
 int keepercall_receive(lua_State* const L_)
 {
     KeeperState const _K{ L_ };
@@ -548,6 +572,7 @@ int keepercall_receive(lua_State* const L_)
 // #################################################################################################
 
 // in: linda key mincount [maxcount]
+[[nodiscard]]
 int keepercall_receive_batched(lua_State* const L_)
 {
     KeeperState const _K{ L_ };
@@ -581,6 +606,7 @@ int keepercall_receive_batched(lua_State* const L_)
 
 // in: linda key [mode]
 // out: mode
+[[nodiscard]]
 int keepercall_restrict(lua_State* const L_)
 {
     KeeperState const _K{ L_ };
@@ -645,6 +671,7 @@ int keepercall_restrict(lua_State* const L_)
 
 // in: linda, key, ...
 // out: true|false|kRestrictedChannel
+[[nodiscard]]
 int keepercall_send(lua_State* const L_)
 {
     KeeperState const _K{ L_ };
@@ -684,6 +711,7 @@ int keepercall_send(lua_State* const L_)
 
 // in: linda key [val...]
 // out: true if the linda was full but it's no longer the case, else false, or kRestrictedChannel if the key is restricted
+[[nodiscard]]
 int keepercall_set(lua_State* const L_)
 {
     KeeperState const _K{ L_ };
@@ -753,6 +781,7 @@ int keepercall_set(lua_State* const L_)
  *
  * Returns: number of return values (pushed to 'L'), unset in case of error
  */
+[[nodiscard]]
 KeeperCallResult keeper_call(KeeperState const K_, keeper_api_t const func_, lua_State* const L_, Linda* const linda_, StackIndex const starting_index_)
 {
     KeeperCallResult _result;
@@ -822,6 +851,7 @@ KeeperCallResult keeper_call(KeeperState const K_, keeper_api_t const func_, lua
 //     }
 //     ...
 // }
+[[nodiscard]]
 int Keeper::PushLindaStorage(Linda& linda_, DestState const L_)
 {
     Keeper* const _keeper{ linda_.whichKeeper() };
@@ -951,16 +981,16 @@ void Keepers::collectGarbage()
 
 // #################################################################################################
 
-
-void Keepers::close()
+[[nodiscard]]
+bool Keepers::close()
 {
     if (isClosing.test_and_set(std::memory_order_release)) {
-        assert(false); // should never close more than once in practice
-        return;
+        return false; // should never close more than once in practice
     }
 
+    // We may have not initialized the keepers if an error was raised in Universe::Create because of bad settings
     if (std::holds_alternative<std::monostate>(keeper_array)) {
-        return;
+        return true;
     }
 
     auto _closeOneKeeper = [](Keeper& keeper_) {
@@ -989,6 +1019,7 @@ void Keepers::close()
     }
 
     keeper_array.emplace<std::monostate>();
+    return true;
 }
 
 // #################################################################################################

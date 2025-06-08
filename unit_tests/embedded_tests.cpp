@@ -2,6 +2,7 @@
 #include "shared.h"
 #include "lanes/src/lanes.hpp"
 
+#if defined __has_include && __has_include(<windows.h>)
 #include <windows.h>
 
 // #################################################################################################
@@ -138,13 +139,13 @@ namespace
 
 // #################################################################################################
 
-TEST_CASE("lanes.embedding.with default allocator")
+TEST_CASE("lanes.embedding.with_default_allocator")
 {
     local::EmbeddedLuaState S;
 
     // ---------------------------------------------------------------------------------------------
 
-    SECTION("single state")
+    SECTION("single_state")
     {
         // this sends data in a linda. current contents:
         // key: short string
@@ -157,7 +158,7 @@ TEST_CASE("lanes.embedding.with default allocator")
         // function with an upvalue
         std::string_view const _script{
             " local lanes = require 'lanes'.configure{with_timers = false}"
-            " local l = lanes.linda'gleh'"
+            " local l = lanes.linda{name = 'gleh'}"
             " local upvalue = 'oeauaoeuoeuaoeuaoeujaoefubycfjbycfybcfjybcfjybcfjbcf'"
             " local upvalued = function()"
             "     return upvalue"
@@ -171,7 +172,7 @@ TEST_CASE("lanes.embedding.with default allocator")
 
     // ---------------------------------------------------------------------------------------------
 
-    SECTION("manual registration")
+    SECTION("manual_registration")
     {
         S.requireSuccess("require 'lanes'.configure{with_timers = false}");
 
@@ -183,7 +184,7 @@ TEST_CASE("lanes.embedding.with default allocator")
         // try to send io.open into a linda, which fails if io base library is not loaded
         std::string_view const _script{
             " local lanes = require 'lanes'"
-            " local l = lanes.linda'gleh'"
+            " local l = lanes.linda{name = 'gleh'}"
             " l:set('yo', io.open)"
             " return 'SUCCESS'"
         };
@@ -203,7 +204,7 @@ TEST_CASE("lanes.embedding.with default allocator")
 
 // this is not really a test yet, just something sitting here until it is converted properly
 // currently it crashes with moonjit (but maybe I just need a more recent moonjit version)
-TEST_CASE("lanes.embedding.with custom allocator")
+TEST_CASE("lanes.embedding.with_custom_allocator")
 {
     static constexpr auto logPrint = +[](lua_State* L) {
         lua_getglobal(L, "ID"); // ID
@@ -266,3 +267,5 @@ TEST_CASE("lanes.embedding.with custom allocator")
     lua_close(L2);
     lua_close(L1);
 }
+
+#endif // windows.h

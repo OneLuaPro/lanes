@@ -38,6 +38,7 @@
 			<a href="#description">Description</a> &middot;
 			<a href="#systems">Supported systems</a> &middot;
 			<a href="#installing">Building and Installing</a> &middot;
+			<a href="#apicheatsheet">API Cheat sheet</a>
 			<a href="#embedding">Embedding</a>
 		</p>
 
@@ -64,13 +65,13 @@
 		<font size="-1">
 			<p>
 				<br />
-				<i>Copyright &copy; 2007-24 Asko Kauppi, Benoit Germain. All rights reserved.</i>
+				<i>Copyright &copy; 2007-25 Asko Kauppi, Benoit Germain. All rights reserved.</i>
 				<br />
 				Lua Lanes is published under the same <a href="http://en.wikipedia.org/wiki/MIT_License">MIT license</a> as Lua 5.1, 5.2, 5.3 and 5.4.
 			</p>
 
 			<p>
-				This document was revised on 17-Mar-25, and applies to version <tt>4.0.0</tt>.
+				This document was revised on 05-Jun-25, and applies to version <tt>4.0.0</tt>.
 			</p>
 		</font>
 	</center>
@@ -105,7 +106,7 @@
 		<li>Threads can be given priorities.</li>
 		<li>Lanes are cancellable, with proper cleanup.</li>
 		<li>No Lua-side application level locking - ever!</li>
-		<li>Several totally independant Lanes universes may coexist in an application, one per "master" Lua state.</li>
+		<li>Several totally independent Lanes universes may coexist in an application, one per "master" Lua state.</li>
 	</ul>
 
 
@@ -116,7 +117,7 @@
 		<li>Sharing full userdata between states needs special C side preparations (-&gt; <A HREF="#deep_userdata">deep userdata</A> and -&gt; <A HREF="#clonable_userdata">clonable userdata</A>).</li>
 		<li>Network level parallelism not included.</li>
 		<li>Multi-CPU is done with OS threads, not processes. A lane is a Lua full userdata, therefore it will exist only as long as the Lua state that created it still exists. Therefore, a lane won't continue execution after the main program's termination.</li>
-		<li>Just like independant Lua states, Lanes universes cannot communicate together.</li>
+		<li>Just like independent Lua states, Lanes universes cannot communicate together.</li>
 	</ul>
 </p>
 
@@ -167,6 +168,84 @@
 	> luarocks install lanes
 	... output ...
 </pre>
+
+
+<!-- API reference +++++++++++++++++++++++++++++++++++++++++++++++++++++++++ -->
+ <hr/>
+ <h2 id="apicheatsheet">API Cheat sheet</h2>
+ <ul>
+	<li>
+		<tt>require "lanes"</tt>: to require Lanes
+	</li>
+	<li>
+		The <tt>lanes</tt> module
+		<ul>
+			<li><tt>lanes.cancel_error</tt>: a special error value returned from cancelled lanes</li>
+			<li><tt>lanes.collectgarbage()</tt>: trigger a GC cycle in all Keeper states</li>
+			<li><tt>lanes.configure()</tt>: configure Lanes</li>
+			<li><tt>lanes.coro()</tt>: start a coroutine-like lane</li>
+			<li><tt>lanes.finally()</tt>: install a function called on Lanes shutdown</li>
+			<li><tt>lanes.gen()</tt>: start a lane as a regular function</li>
+			<li><tt>lanes.genactomic()</tt>: obtain an atomic counter</li>
+			<li><tt>lanes.genlock()</tt>: obtain an atomic-like data stack</li>
+			<li><tt>lanes.linda()</tt>: create a Linda</li>
+			<li><tt>lanes.nameof()</tt>: find where a value exists</li>
+			<li><tt>lanes.thread_priority_range()</tt>: obtain the valid range of thread priorities</li>
+			<li><tt>lanes.now_secs()</tt>: obtain the current clock value</li>
+			<li><tt>lanes.register()</tt>: scan modules so that functions using them can be transferred</li>
+			<li><tt>lanes.set_thread_priority()</tt>: change thread priority</li>
+			<li><tt>lanes.set_thread_affinity()</tt>: change thread affinity</li>
+			<li><tt>lanes.threads()</tt>: obtain a list of all lanes</li>
+			<li><tt>lanes.sleep()</tt>: sleep for a given duration</li>
+			<li><tt>lanes.timer()</tt>: start a timer</li>
+			<li><tt>lanes.timers()</tt>: list active timers</li>
+		</ul>
+	</li>
+	<li>
+		Given some lane handle <tt>lane_h</tt>
+		<ul>
+			<li><tt>lane_h[]</tt>: wait for, and read the values returned by the lane</li>
+			<li><tt>lane_h:cancel()</tt>: request the lane to stop running</li>
+			<li><tt>lane_h.error_trace_level</tt>: current setting of error logging level</li>
+			<li><tt>lane_h:get_threadname()</tt>: read the thread name</li>
+			<li><tt>lane_h:join()</tt>: wait for the lane to terminate (or yield)</li>
+			<li><tt>lane_h:resume()</tt>: resume a coroutine Lane</li>
+			<li><tt>lane_h.status</tt>: current status of the lane</li>
+		</ul>
+	</li>
+	<li>
+		Inside the lane
+		<ul>
+			<li><tt>cancel_test()</tt>: check for cancellation requests</li>
+			<li><tt>lane_threadname()</tt>: read or change the name of the thread</li>
+			<li><tt>set_finalizer()</tt>: install a function called when the lane exits</li>
+		</ul>
+	</li>
+	<li>
+		Given some Linda <tt>l</tt>
+		<ul>
+			<li><tt>l:cancel()</tt>: mark a Linda for cancellation</li>
+			<li><tt>l:collectgarbage()</tt>: trigger a GC cycle in the Linda's Keeper state</li>
+			<li><tt>l:deep()</tt>: obtain a light userdata uniquely representing the Linda</li>
+			<li><tt>l:dump()</tt>: have information about slot contents</li>
+			<li><tt>l:count()</tt>: obtain a count of data items in slots</li>
+			<li><tt>l:get()</tt>: read data without consuming it</li>
+			<li><tt>l:limit()</tt>: cap the amount of transiting data</li>
+			<li><tt>l:receive()</tt>: read one item of data from multiple slots</li>
+			<li><tt>l:receive_batched()</tt>: read several item of data from a single slot</li>
+			<li><tt>l:restrict()</tt>: place a restraint on the operations that can be done on a slot</li>
+			<li><tt>l:send()</tt>: append data</li>
+			<li><tt>l:set()</tt>: replace the data</li>
+			<li><tt>l:wake()</tt>: manually wake blocking calls</li>
+		</ul>
+	</li>
+	<li>
+		embedding
+		<ul>
+			<li><tt>luaopen_lanes_embedded</tt>: manually initialize Lanes</li>
+		</ul>
+	</li>
+ </ul>
 
 
 <!-- embedding +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++ -->
@@ -271,7 +350,7 @@
 </p>
 
 <p>
-	<tt>lanes.configure</tt> accepts an optional options table as sole argument.
+	<tt>lanes.configure</tt> accepts an optional table as sole argument.
 	<table border="1" cellpadding="10" style="width:100%">
 		<tr>
 			<th style="width:15%">name</th>
@@ -333,6 +412,22 @@
 				If 0, GC runs after *every* <a href="#keepers">Keeper</a> operation.<br />
 				If &gt;0, <a href="#keepers">Keeper states</a> run GC manually with <tt>lua_gc(LUA_GCCOLLECT)</tt> whenever memory usage reported by <tt>lua_gc(LUA_GCCOUNT)</tt> reaches this threshold.
 				Check is made after every operation (see <a href="#lindas">below</a>). If memory usage remains above threshold after the GC cycle, an error is raised.
+			</td>
+		</tr>
+
+		<tr valign=top>
+			<td id="linda_wake_period">
+				<code>.linda_wake_period</code>
+			</td>
+			<td>
+				number > 0
+			</td>
+			<td>
+				Sets the default period in seconds a linda will wake by itself during blocked operations. Default is never.<br />
+				When a Linda enters a blocking call (<tt>send()</tt>, <tt>receive()</tt>, <tt>receive_batched()</tt>, <tt>sleep()</tt>), it normally sleeps either until the operation completes
+				or the specified timeout expires. With this setting, the default behavior can be changed to wake periodically. This can help for example with timing issues where a lane is signalled
+				for cancellation, but a linda inside the lane was in the middle of processing an operation but did not actually start the wait. This can result in the signal to be ignored, thus
+				causing the Linda to wait out the full operation timeout before cancellation is processed.
 			</td>
 		</tr>
 
@@ -769,12 +864,13 @@
 		</tr>
 		<tr valign=top>
 			<td>
-				<code>.priority</code>
+				<code>.priority</code><br />
+				<code>.native_priority</code>
 			</td>
 			<td>integer</td>
 			<td>
-				The priority of lanes generated in the range -3..+3 (default is 0).
-				These values are a mapping over the actual priority range of the underlying implementation.<br />
+				<tt>priority</tt>: The priority of lanes in the range <tt>[-3,+3]</tt> (default is 0). These values are a mapping over the actual priority range of the underlying implementation.<br />
+				<tt>native_priority</tt>: The priority of lanes in a platform-dependent the range. Use <a href="#priority"><tt>lanes.thread_priority_range()</tt></a> to query said range.
 				Implementation and dependability of priorities varies by platform. Especially Linux kernel 2.6 is not supporting priorities in user mode.<br />
 				A lane can also change its own thread priority dynamically with <a href="#priority"><tt>lanes.set_thread_priority()</tt></a>.
 			</td>
@@ -863,14 +959,17 @@
 	<table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%">
 		<tr>
 			<td>
-				<pre>	lanes.set_thread_priority(prio)</pre>
+				<pre>	prio_min, prio_max = lanes.thread_priority_range(prio [,"native"])</pre>
+				<pre>	lanes.set_thread_priority(prio [,"native"])</pre>
 			</td>
 		</tr>
 	</table>
 <p>
 	Besides setting a default priority in the generator <a href="#generator_settings">settings</a>, each thread can change its own priority at will. This is also true for the main Lua state.
 	<br />
-	The priority must be in the range <tt>[-3,+3]</tt>.
+	<tt>lanes.thread_priority_range()</tt> returns the range of acceptable mapped values. If nothing is specified, should be <tt>[-3,3]</tt> or <tt>[0,3]</tt>, depending on the threading implementation.
+	<br />
+	<tt>lanes.thread_priority_range('native')</tt> returns the range of acceptable native values. The actual values are threading implementation dependent. And some implementations can only accept some values inside that range. YMMV.
 </p>
 
 
@@ -1057,7 +1156,7 @@
 </p>
 
 <table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%"><tr><td><pre>
-	[...]|[nil,err,stack_tbl]= lane_h:join([timeout])
+	[true, ...]|[nil,err,stack_tbl]= lane_h:join([timeout])
 </pre></td></tr></table>
 
 <p>
@@ -1075,7 +1174,7 @@
 			</ul>
 		</li>
 		<li><tt>nil, "killed"</tt> if forcefully killed.</li>
-		<li>The return values of the lane function. If the first return value is <tt>nil</tt> (or there is no return value), an error is raised, to make sure you can tell timeout and error cases apart from successful return.</li>
+		<li><tt>true [, returned-values]</tt>: The return values of the lane function.</li>
 	</ul>
 	If the lane handle obtained from <tt>lanes.gen()</tt> is to-be-closed, closing the value will cause a call to <tt>join()</tt>. Since it is implicit, the lane body isn't forced to return non-<tt>nil</tt> in that case.
 </p>
@@ -1121,38 +1220,49 @@
 </pre></td></tr></table>
 
 <p>
-	<tt>timeout</tt> is an optional number &gt= 0. Defaults to infinite if left unspecified or <tt>nil</tt>.
-	<br />
 	<tt>cancel()</tt> sends a cancellation request to the lane.
-	<br />
-	First argument is a <tt>mode</tt> can be one of:
+	<p>
+		Returns <tt>true, lane_h.status</tt> if lane was already done (in <tt>"done"</tt>, <tt>"error"</tt> or <tt>"cancelled"</tt> status), or the cancellation was fruitful within <tt>timeout_secs</tt> timeout period.<br />
+		Returns <tt>false, "timeout"</tt> otherwise.
+	</p>
+	First argument is a <tt>mode</tt>. It can be one of:
 	<ul>
 		<li>
-			<tt>"soft"</tt>: Cancellation will only cause <tt>cancel_test()</tt> to return <tt>true</tt>, so that the lane can cleanup manually.
+			<tt>"soft"</tt>: Cancellation will only cause <tt>cancel_test()</tt> to return <tt>"soft"</tt>, so that the lane can cleanup manually.
+			<br />
+			Lindas will also check for cancellation inside blocking calls to early out based on their <tt>wake_period</tt>.
 		</li>
 		<li>
-			<tt>"hard"</tt>: waits for the request to be processed, or a timeout to occur. <a href="#lindas">linda</a> operations detecting the cancellation request will raise a special cancellation error (meaning they won't return in that case).<br />
+			<tt>"hard"</tt>: waits for the request to be processed, or a timeout to occur. <a href="#lindas">linda</a> operations detecting the cancellation request will raise a special cancellation error (meaning they won't return in that case).
+			<br />
+			If the lane isn't actually waiting on a Linda when the request is issued, a lane calling <tt>cancel_test()</tt> will see it return <tt>"hard"</tt>.
+			<br />
 			<tt>wake_lane</tt> defaults to <tt>true</tt>, and <tt>timeout</tt> defaults to 0 if not specified.
 		</li>
 		<li>
 			<tt>"call"</tt>, <tt>"ret"</tt>, <tt>"line"</tt>, <tt>"count"</tt>: Asynchronously install the corresponding hook, then behave as <tt>"hard"</tt>.
+			<br />
+			If the lane has the opportunity to call <tt>cancel_test()</tt> before the hook is invoked, calling <tt>cancel_test()</tt> will see it return <tt>"hard"</tt>.
 		</li>
 		<li>
 			<tt>"all"</tt>: Installs all hooks in one shot, just to be sure.
 		</li>
 	</ul>
-	If <tt>mode</tt> is not specified, it defaults to <tt>"hard"</tt>.
+	<p>
+		If <tt>mode</tt> is not specified, it defaults to <tt>"hard"</tt>.
+	</p>
+</p>
+<p>
 	If <tt>wake_lane</tt> is <tt>true</tt>, the lane is also signalled so that execution returns from any pending <a href="#lindas">linda</a> operation. <a href="#lindas">linda</a> operations detecting the cancellation request return <tt>lanes.cancel_error</tt>.
 </p>
 <p>
-	Returns <tt>true, lane_h.status</tt> if lane was already done (in <tt>"done"</tt>, <tt>"error"</tt> or <tt>"cancelled"</tt> status), or the cancellation was fruitful within <tt>timeout_secs</tt> timeout period.<br />
-	Returns <tt>false, "timeout"</tt> otherwise.
+	<tt>timeout</tt> is an optional number &gt= 0. Defaults to infinite if left unspecified or <tt>nil</tt>.
 </p>
 <p>
 	If the lane is still running after the timeout expired, there is a chance lanes will freeze forever at shutdown when failing to terminate all free-running lanes within the specified timeout.
 </p>
 <p>
-	Cancellation is tested <u>before</u> going to sleep in <tt>receive()</tt> or <tt>send()</tt> calls and after executing <tt>cancelstep</tt> Lua statements. A pending <tt>receive()</tt>or <tt>send()</tt> call is awakened.
+	Cancellation is tested <u>before</u> going to sleep in <tt>receive()</tt>, <tt>receive_batched()</tt> or <tt>send()</tt> calls and after executing <tt>cancelstep</tt> Lua statements. A pending <tt>receive()</tt>or <tt>send()</tt> call is awakened.
 	<br />
 	This means the execution of the lane will resume although the operation has not completed, to give the lane a chance to detect cancellation (even in the case the code waits on a <a href="#lindas">linda</a> with infinite timeout).
 	<br />
@@ -1222,7 +1332,7 @@
 <table border="1" bgcolor="#FFFFE0" cellpadding="10" style="width:50%"><tr><td><pre>
 	local lanes = require "lanes"
 
-	local linda = lanes.linda("my linda")
+	local linda = lanes.linda{name = "my linda"}
 
 	local function loop(max)
 		for i = 1, max do
@@ -1276,16 +1386,24 @@
 </p>
 
 <table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%"><tr><td><pre>
-	h = lanes.linda([name],[group],[close_handler])
+	h = lanes.linda(table|nil)
 </pre></td></tr></table>
 
 <p>
-	Arguments to <tt>lanes.linda()</tt>  can be provided in any order, as long as there is a single string, a single number, and a single callable value (all are optional).<br />
-	Converting the linda to a string will yield the provided name prefixed by <tt>"Linda: "</tt>.<br />
-	If <tt>opt_name</tt> is omitted, it will evaluate to an hexadecimal number uniquely representing that linda when the linda is converted to a string. The value is the same as returned by <tt>linda:deep()</tt>.<br />
-	If <tt>opt_name</tt> is <tt>"auto"</tt>, Lanes will try to construct a name from the source location that called <tt>lanes.linda()</tt>. If that fails, the linda name will be <tt>"&lt;unresolved&gt;"</tt>.<br />
-	If Lanes is configured with more than one Keeper state, <tt>group</tt> is mandatory.<br />
-	If the linda is to-be-closed (Lua 5.4+), and a <tt>close_handler</tt> is provided, it will be called with all the provided arguments. For older Lua versions, its presence will cause an error.
+	Argument to <tt>lanes.linda()</tt> is either <tt>nil</tt> or a single table. The table may contain the following entries:
+	<ul>
+		<li><tt>close_handler</tt>: a callable object (function or table/userdata with <tt>__call</tt> metamethod). If provided, and the linda is to-be-closed (Lua 5.4+), it will be called with all the provided arguments. For older Lua versions, its presence is ignored.</li>
+		<li><tt>group</tt>: an integer between 0 and the number of Keeper states. Mandatory if Lanes is configured with more than one Keeper state. Group 0 is used by the internal timer linda.</li>
+		<li>
+			<tt>name</tt>: a string. Converting the linda to a string will yield the provided name prefixed by <tt>"Linda: "</tt>.
+			If omitted or empty, it will evaluate to the string representation of a hexadecimal number uniquely representing that linda when the linda is converted to a string. The numeric value is the same as returned by <tt>linda:deep()</tt>.<br />
+			If <tt>"auto"</tt>, Lanes will try to construct a name from the source location that called <tt>lanes.linda()</tt>. If that fails, the linda name will be <tt>"&lt;unresolved&gt;"</tt>.
+		</li>
+		<li>
+			<tt>wake_period</tt>: a number > 0 (unit: seconds). If provided, overrides <a href="#linda_wake_period"><tt>linda_wake_period</tt></a> provided to <a href="#initialization"><tt>lanes.configure()</tt></a>.
+		</li>
+	</ul>
+	Unknown fields are silently ignored.
 </p>
 
 <table border="1" bgcolor="#E0E0FF" cellpadding="10" style="width:50%"><tr><td><pre>

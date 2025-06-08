@@ -4,6 +4,7 @@
 #include "cancel.hpp"
 #include "keeper.hpp"
 #include "lanesconf.h"
+#include "threading.hpp"
 #include "tracker.hpp"
 #include "uniquekey.hpp"
 
@@ -27,12 +28,7 @@ class ProtectedAllocator final
     std::mutex mutex;
 
     [[nodiscard]]
-    static void* protected_lua_Alloc(void* const ud_, void* const ptr_, size_t const osize_, size_t const nsize_)
-    {
-        ProtectedAllocator* const allocator{ static_cast<ProtectedAllocator*>(ud_) };
-        std::lock_guard<std::mutex> guard{ allocator->mutex };
-        return allocator->alloc(ptr_, osize_, nsize_);
-    }
+    static void* Protected_lua_Alloc(void* const ud_, void* const ptr_, size_t const osize_, size_t const nsize_);
 
     public:
     // we are not like our base class: we can't be created inside a full userdata (or we would have to install a metatable and __gc handler to destroy ourselves properly)
@@ -42,13 +38,13 @@ class ProtectedAllocator final
 
     AllocatorDefinition makeDefinition()
     {
-        return AllocatorDefinition{ protected_lua_Alloc, this };
+        return AllocatorDefinition{ Protected_lua_Alloc, this };
     }
 
     void installIn(lua_State* const L_) const
     {
         // install our replacement allocator function (this is a C function, we need to deconst ourselves)
-        lua_setallocf(L_, protected_lua_Alloc, static_cast<void*>(const_cast<ProtectedAllocator*>(this)));
+        lua_setallocf(L_, Protected_lua_Alloc, static_cast<void*>(const_cast<ProtectedAllocator*>(this)));
     }
 
     void removeFrom(lua_State* const L_) const
@@ -75,9 +71,9 @@ class Universe final
 
 #ifdef PLATFORM_LINUX
     // Linux needs to check, whether it's been run as root
-    bool const sudo{ geteuid() == 0 };
+    SudoFlag const sudo{ geteuid() == 0 };
 #else
-    bool const sudo{ false };
+    SudoFlag const sudo{ false };
 #endif // PLATFORM_LINUX
 
     // for verbose errors
@@ -98,6 +94,8 @@ class Universe final
     lanes::AllocatorDefinition internalAllocator;
 
     Keepers keepers;
+
+    lua_Duration lindaWakePeriod{};
 
     // Initialized by 'init_once_LOCKED()': the deep userdata Linda object
     // used for timers (each lane will get a proxy to this)

@@ -68,7 +68,8 @@ struct Keepers
 
     Keepers() = default;
     void collectGarbage();
-    void close();
+    [[nodiscard]]
+    bool close();
     [[nodiscard]]
     Keeper* getKeeper(KeeperIndex idx_);
     [[nodiscard]]

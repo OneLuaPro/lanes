@@ -21,7 +21,7 @@ enum class [[nodiscard]] FuncSubType
 };
 
 [[nodiscard]]
-FuncSubType luaG_getfuncsubtype(lua_State* L_, StackIndex i_);
+FuncSubType luaW_getfuncsubtype(lua_State* L_, StackIndex i_);
 
 // #################################################################################################
 
@@ -37,5 +37,6 @@ namespace tools {
     void PopulateFuncLookupTable(lua_State* L_, StackIndex i_, std::string_view const& name_);
     [[nodiscard]]
     std::string_view PushFQN(lua_State* L_, StackIndex t_);
+    void PushFunctionBytecode(SourceState L1_, DestState L2_, int strip_);
     void SerializeRequire(lua_State* L_);
 } // namespace tools

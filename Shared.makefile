@@ -36,7 +36,7 @@ ifeq "$(LUAROCKS)" ""
       LUA_FLAGS := -I "$(LUA_DEV)/include"
       LUA_LIBS := "$(LUA_DEV)/lua5.1.dll" -lgcc
     endif
-    LIBFLAG := -shared -Wl,-Map,lanes.map
+    LIBFLAG := -shared -Wl,-Map,lanes.map -fvisibility=hidden
   else
     # Autodetect LUA_FLAGS and/or LUA_LIBS
     #

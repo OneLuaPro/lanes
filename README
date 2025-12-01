@@ -47,6 +47,14 @@ if this no longer applies on more recent kernels.
   Usage on Mac OS X:
 ======================
 
+Lanes needs a c++20 compiler with enough of the standard being implemented.
+
+Building Lanes using Luarocks, that means (thanks Thijs!):
+
+luarocks make CC="env MACOSX_DEPLOYMENT_TARGET=13.3 gcc" LD="env MACOSX_DEPLOYMENT_TARGET=13.3 gcc" CFLAGS="-O2 -fPIC -std=c++20"
+
+The rest of the text here is from Asko, and may well be outdated. Feel free to correct it if you know better.
+
 No real problems in OS X, _once_ everything is set up right...
 
 In short, have your Lua core compiled with LUA_USE_DLOPEN and LUA_USE_POSIX

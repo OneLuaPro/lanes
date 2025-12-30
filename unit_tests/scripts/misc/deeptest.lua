@@ -1,4 +1,5 @@
-local lanes = require("lanes").configure{ with_timers = false}
+local fixture = require "fixture"
+local lanes = require("lanes").configure{on_state_create = fixture.on_state_create}
 local l = lanes.linda{name = "my linda"}
 
 local table_unpack = table.unpack or unpack -- Lua 5.1 support

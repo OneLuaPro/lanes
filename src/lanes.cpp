@@ -835,10 +835,11 @@ void signal_handler(int signal_)
 
 // helper to have correct callstacks when crashing a Win32 running on 64 bits Windows
 // don't forget to toggle Debug/Exceptions/Win32 in visual Studio too!
-static std::atomic_flag s_ecoc_initDone;
-static std::atomic_flag s_ecoc_go_ahead;
 static void EnableCrashingOnCrashes(void)
 {
+    static std::atomic_flag s_ecoc_initDone;
+    static std::atomic_flag s_ecoc_go_ahead;
+
     if (!s_ecoc_initDone.test_and_set(std::memory_order_acquire)) {
         using GetPolicy_t = BOOL(WINAPI *)(LPDWORD lpFlags);
         using SetPolicy_t = BOOL(WINAPI *)(DWORD dwFlags);
@@ -907,6 +908,9 @@ LANES_API int luaopen_lanes_core(lua_State* const L_)
         // will do nothing on first invocation, as we haven't stored settings in the registry yet
         lua_setfield(L_, -3, "settings");                                                          // L_: M LG_configure()
         lua_setfield(L_, -2, "configure");                                                         // L_: M
+        // lanes.null can be used for some configure settings, expose it now
+        kNilSentinel.pushKey(L_);                                                                  // L_: M kNilSentinel
+        lua_setfield(L_, -2, "null");                                                              // L_: M
     }
 
     STACK_CHECK(L_, 1);

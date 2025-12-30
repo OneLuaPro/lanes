@@ -30,13 +30,13 @@ ifeq "$(LUAROCKS)" ""
       $(warning LUA_DEV not defined - try i.e. 'make LUA_DEV=/c/Program\ Files/Lua/5.1')
       # this assumes Lua was built and installed from source and everything is located in default folders (/usr/local/include and /usr/local/bin)
       LUA_FLAGS := -I "/usr/local/include"
-      LUA_LIBS := $(word 1,$(shell which lua54.$(_SO) 2>/dev/null) $(shell which lua53.$(_SO) 2>/dev/null) $(shell which lua52.$(_SO) 2>/dev/null) $(shell which lua51$(_SO) 2>/dev/null))
+      LUA_LIBS := $(word 1,$(shell which lua55.$(_SO) 2>/dev/null) $(shell which lua54.$(_SO) 2>/dev/null) $(shell which lua53.$(_SO) 2>/dev/null) $(shell which lua52.$(_SO) 2>/dev/null) $(shell which lua51$(_SO) 2>/dev/null))
       $(info detected LUA_LIBS as $(LUA_LIBS))
     else
       LUA_FLAGS := -I "$(LUA_DEV)/include"
       LUA_LIBS := "$(LUA_DEV)/lua5.1.dll" -lgcc
     endif
-    LIBFLAG := -shared -Wl,-Map,lanes.map
+    LIBFLAG := -shared -Wl,-Map,lanes.map -fvisibility=hidden
   else
     # Autodetect LUA_FLAGS and/or LUA_LIBS
     #

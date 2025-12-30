@@ -1779,6 +1779,8 @@ xcopy /F /I /R /Y "$(OutputPath)$(TargetName).pdb" "$(SolutionDir)_LuaVersions/$
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\.clang-format" />
+    <None Include="ABOUT" />
+    <None Include="BUGS" />
     <None Include="CHANGES" />
     <CustomBuild Include="src\lanes.lua">
       <FileType>Document</FileType>
@@ -2024,11 +2026,13 @@ xcopy /F /I /R /Y "$(OutputPath)$(TargetName).pdb" "$(SolutionDir)_LuaVersions/$
       </MaxItemsInBatch>
     </CustomBuild>
     <None Include="CMakeLists.txt" />
+    <None Include="COPYRIGHT" />
     <None Include="docs\comparison.html" />
     <None Include="docs\index.html" />
     <None Include="lanes-4.0.0-0.rockspec" />
     <None Include="Lanes.slnenv" />
     <None Include="make-vc.cmd" />
+    <None Include="README" />
     <None Include="Shared.makefile" />
     <None Include="src\Lanes.makefile" />
     <None Include="Makefile" />
@@ -2060,6 +2064,7 @@ xcopy /F /I /R /Y "$(OutputPath)$(TargetName).pdb" "$(SolutionDir)_LuaVersions/$
     <None Include="tests\objects.lua" />
     <None Include="tests\parallel_os_calls.lua" />
     <None Include="tests\perftest.lua" />
+    <None Include="tests\pingpong.lua" />
     <None Include="tests\protectproxy.lua" />
     <None Include="tests\protect_allocator.lua" />
     <None Include="tests\recursive.lua" />

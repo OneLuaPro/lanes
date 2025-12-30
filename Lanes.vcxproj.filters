@@ -297,6 +297,21 @@
     <None Include="Lanes.slnenv">
       <Filter>Resource Files\Make</Filter>
     </None>
+    <None Include="tests\pingpong.lua">
+      <Filter>tests</Filter>
+    </None>
+    <None Include="ABOUT">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="BUGS">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="COPYRIGHT">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="README">
+      <Filter>Resource Files</Filter>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="src\lanes.lua">

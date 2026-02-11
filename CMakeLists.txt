@@ -78,13 +78,6 @@ target_compile_options(lanes_core PRIVATE
   /D_CRT_SECURE_NO_WARNINGS /D_WINDLL /std:c++20 /DNODEBUG)
 # ------------------------------------------------------------------------------
 
-# Install all files and documentation
-# set(INSTALL_LMOD share/lua/lmod CACHE PATH "Directory to install Lua modules.")
-# set(INSTALL_CMOD share/lua/cmod CACHE PATH "Directory to install Lua binary modules.")
-# set(INSTALL_DATA share/${PROJECT_NAME} CACHE PATH "Directory the package can store documentation, tests or other data in.")
-# set(INSTALL_DOC ${INSTALL_DATA}/doc CACHE PATH "Recommended directory to install documentation into.")
-# set(INSTALL_TEST ${INSTALL_DATA}/test CACHE PATH "Recommended directory to install tests into.")
-
 # ------------------------------------------------------------------------------
 # Setup GNU-alike installatin directories
 include (GNUInstallDirs)
@@ -113,17 +106,11 @@ set(INSTALL_LMOD
 set(INSTALL_DATA
   ${INSTALL_DATAROOTDIR}/doc/lanes
   CACHE PATH "Directory the package can store documentation, tests or other data in.")
-set(INSTALL_DOC
-  ${INSTALL_DATAROOTDIR}/doc/lanes/doc
-  CACHE PATH "Recommended directory to install documentation into.")
-set(INSTALL_TEST
-  ${INSTALL_DATAROOTDIR}/doc/lanes/test
-  CACHE PATH "Recommended directory to install tests into.")
-# ------------------------------------------------------------------------------
 
+# ------------------------------------------------------------------------------
+# Install files
 INSTALL (TARGETS lanes_core DESTINATION ${INSTALL_CMOD})
 INSTALL (FILES src/lanes.lua DESTINATION ${INSTALL_LMOD})
-
-INSTALL (FILES ABOUT BUGS COPYRIGHT CHANGES README TODO DESTINATION ${INSTALL_DATA})
-INSTALL (DIRECTORY docs/ DESTINATION ${INSTALL_DOC})
-INSTALL (DIRECTORY tests/ DESTINATION ${INSTALL_TEST})
+INSTALL (FILES ABOUT BUGS COPYRIGHT CHANGES README TODO DESTINATION ${INSTALL_DATA}/misc)
+INSTALL (DIRECTORY docs/ DESTINATION ${INSTALL_DATA})
+INSTALL (DIRECTORY tests DESTINATION ${INSTALL_DATA})

@@ -76,6 +76,11 @@ SET_TARGET_PROPERTIES(lanes_core PROPERTIES PREFIX "")
 # ------------------------------------------------------------------------------
 target_compile_options(lanes_core PRIVATE
   /D_CRT_SECURE_NO_WARNINGS /D_WINDLL /std:c++20 /DNODEBUG)
+if(CMAKE_CXX_COMPILER_ID MATCHES "IntelLLVM")
+  # Silence "warning: function declared 'noreturn' should not return
+  # [-Winvalid-noreturn]" warnings
+  target_compile_options(lanes_core PRIVATE -Wno-invalid-noreturn)
+endif()
 # ------------------------------------------------------------------------------
 
 # ------------------------------------------------------------------------------

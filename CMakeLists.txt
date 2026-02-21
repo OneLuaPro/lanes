@@ -84,8 +84,13 @@ set_target_properties(lanes_core PROPERTIES
 )
 if(CMAKE_CXX_COMPILER_ID MATCHES "IntelLLVM")
   # Silence "warning: function declared 'noreturn' should not return
-  # [-Winvalid-noreturn]" warnings
-  target_compile_options(lanes_core PRIVATE -Wno-invalid-noreturn)
+  #          [-Winvalid-noreturn]" warnings
+  # Silence "warning: attribute 'nodiscard' cannot be applied to functions
+  #          without return value [-Wignored-attributes]"
+  target_compile_options(lanes_core PRIVATE
+    -Wno-invalid-noreturn
+    -Wno-ignored-attributes
+  )
 endif()
 # ------------------------------------------------------------------------------
 

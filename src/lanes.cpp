@@ -1,6 +1,6 @@
 /*
  * LANES.CPP                            Copyright (c) 2007-08, Asko Kauppi
- *                                      Copyright (C) 2009-24, Benoit Germain
+ *                                      Copyright (C) 2009-26, Benoit Germain
  *
  * Multithreading in Lua.
  *
@@ -56,7 +56,7 @@
 ===============================================================================
 
 Copyright (C) 2007-10 Asko Kauppi <akauppi@gmail.com>
-              2011-24 Benoit Germain <bnt.germain@gmail.com>
+              2011-26 Benoit Germain <bnt.germain@gmail.com>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -169,25 +169,23 @@ LUAG_FUNC(sleep)
     extern LUAG_FUNC(linda_receive);
 
     Universe* const _U{ Universe::Get(L_) };
-    lua_settop(L_, 1);
-    lua_pushcfunction(L_, LG_linda_receive);                                                       // L_: duration|nil receive()
+    lua_settop(L_, 1);                                                                             // L_: duration?
+    lua_pushcfunction(L_, LG_linda_receive);                                                       // L_: duration? receive()
     STACK_CHECK_START_REL(L_, 0); // we pushed the function we intend to call, now prepare the arguments
-    _U->timerLinda->push(L_);                                                                      // L_: duration|nil receive() timerLinda
-    if (luaW_tostring(L_, StackIndex{ 1 }) == "indefinitely") {
-        lua_pushnil(L_);                                                                           // L_: duration? receive() timerLinda nil
-    } else if (lua_isnoneornil(L_, 1)) {
-        lua_pushnumber(L_, 0);                                                                     // L_: duration? receive() timerLinda 0
-    } else if (!lua_isnumber(L_, 1)) {
-        raise_luaL_argerror(L_, StackIndex{ 1 }, "duration must be a number");
-    }
-    else {
+    _U->timerLinda->push(L_);                                                                      // L_: duration? receive() timerLinda
+    if (lua_isnumber(L_, 1)) {
         auto const _n{ lua_tonumber(L_, 1) };
         if (_n < 0) {
             raise_luaL_argerror(L_, StackIndex{ 1 }, "duration must be >= 0");
         }
-        lua_pushnumber(L_, lua_tonumber(L_, 1));                                                   // L_: duration? receive() timerLinda duration
+        lua_pushvalue(L_, StackIndex{ 1 });                                                        // L_: duration? receive() timerLinda timeout
+    } else if (lua_isnoneornil(L_, 1)) {
+        lua_pushnil(L_);                                                                           // L_: duration? receive() timerLinda timeout
+    } else {
+        raise_luaL_argerror(L_, StackIndex{ 1 }, "duration must be a number");
     }
-    luaW_pushstring(L_, "ac100de1-a696-4619-b2f0-a26de9d58ab8");                                   // L_: duration? receive() timerLinda duration key
+
+    luaW_pushstring(L_, "ac100de1-a696-4619-b2f0-a26de9d58ab8");                                   // L_: duration? receive() timerLinda timeout key
     STACK_CHECK(L_, 3); // 3 arguments ready
     lua_call(L_, 3, LUA_MULTRET); // timerLinda:receive(duration,key)                              // L_: duration? result...
     return lua_gettop(L_) - 1;
@@ -259,6 +257,231 @@ LUAG_FUNC(thread_priority_range)
 
 // #################################################################################################
 
+namespace {
+    namespace local {
+        struct LanePriority
+        {
+            int priority;
+            NativePrioFlag native;
+        };
+
+        // Read the priority-is-native flag and optional priority integer from the lane_new() argument stack.
+        // Validates the priority against the acceptable range
+        [[nodiscard]]
+        static LanePriority ResolveLanePriority(lua_State* const L_, StackIndex const prinIdx_, StackIndex const prioIdx_)
+        {
+            NativePrioFlag const _native{ static_cast<bool>(lua_toboolean(L_, prinIdx_)) };
+            if (lua_isnoneornil(L_, prioIdx_)) {
+                return { kThreadPrioDefault, _native };
+            }
+            int const _priority{ static_cast<int>(lua_tointeger(L_, prioIdx_)) };
+
+            auto _checkPriorityRange = [L_, _priority](std::pair<int, int> prios_) {
+                auto const [_prio_min, _prio_max] = prios_;
+                if (_priority < _prio_min || _priority > _prio_max) {
+                    raise_luaL_error(L_, "Priority out of range: %d..+%d (%d)", _prio_min, _prio_max, _priority);
+                }
+            };
+
+            _checkPriorityRange(_native ? THREAD_NATIVE_PRIOS() : std::pair{ kThreadPrioMin, kThreadPrioMax });
+
+            return { _priority, _native };
+        }
+
+        // Copy the 'package' table from the source state into the lane state so that the lane
+        // inherits the loader configuration. No-op when packageIdx_ is nil/none.
+        static void TransferPackage(Universe* const U_, lua_State* const L_, lua_State* const L2_, StackIndex const packageIdx_)
+        {
+            if (lua_isnoneornil(L_, packageIdx_)) {
+                return;
+            }
+            DEBUGSPEW_CODE(DebugSpew(U_) << "lane_new: update 'package'" << std::endl);
+            // when copying with mode LookupMode::LaneBody, should raise an error in case of problem, not leave it on the stack
+            InterCopyContext _c{ U_, DestState{ L2_ }, SourceState{ L_ }, {}, SourceIndex{ packageIdx_ }, {}, {}, {} };
+            [[maybe_unused]] InterCopyResult const _ret{ _c.interCopyPackage() };
+            LUA_ASSERT(L_, _ret == InterCopyResult::Success); // either all went well, or we should not even get here
+        }
+
+        // require() each module listed in requiredIdx_ inside the lane state, then register its
+        // exported functions in the lookup table. No-op when requiredIdx_ is nil/none.
+        static void RequireModulesInLane(Universe* const U_, lua_State* const L_, lua_State* const L2_, StackIndex const requiredIdx_)
+        {
+            if (lua_isnoneornil(L_, requiredIdx_)) {
+                return;
+            }
+            DEBUGSPEW_CODE(DebugSpew(U_) << "lane_new: process 'required' list" << std::endl);
+            DEBUGSPEW_CODE(DebugSpewIndentScope _scope{ U_ });
+            // should not happen, was checked in lanes.lua before calling lane_new()
+            if (luaW_type(L_, requiredIdx_) != LuaType::TABLE) {
+                raise_luaL_error(L_, "expected required module list as a table, got %s", luaL_typename(L_, requiredIdx_));
+            }
+
+            int _nbRequired{ 1 };
+            lua_pushnil(L_);                                                                       // L_: [fixed] args... nil                        L2:
+            while (lua_next(L_, requiredIdx_) != 0) {                                              // L_: [fixed] args... n "modname"                L2:
+                if (luaW_type(L_, kIdxTop) != LuaType::STRING || luaW_type(L_, StackIndex{ -2 }) != LuaType::NUMBER || lua_tonumber(L_, -2) != _nbRequired) {
+                    raise_luaL_error(L_, "required module list should be a list of strings");
+                } else {
+                    // require the module in the target state, and populate the lookup table there too
+                    std::string_view const _name{ luaW_tostring(L_, kIdxTop) };
+                    DEBUGSPEW_CODE(DebugSpew(U_) << "lane_new: require '" << _name << "'" << std::endl);
+
+                    // require the module in the target lane
+                    lua_getglobal(L2_, "require");                                                 // L_: [fixed] args... n "modname"                L2: require()?
+                    if (lua_isnil(L2_, -1)) {
+                        lua_pop(L2_, 1);                                                           // L_: [fixed] args... n "modname"                L2:
+                        raise_luaL_error(L_, "cannot pre-require modules without loading 'package' library first");
+                    } else {
+                        luaW_pushstring(L2_, _name);                                               // L_: [fixed] args... n "modname"                L2: require() name
+                        LuaError const _rc{ lua_pcall(L2_, 1, 1, 0) };                             // L_: [fixed] args... n "modname"                L2: ret/errcode
+                        if (_rc != LuaError::OK) {
+                            // propagate error to main state if any
+                            InterCopyContext _c{ U_, DestState{ L_ }, SourceState{ L2_ }, {}, {}, {}, {}, {} };
+                            std::ignore = _c.interMove(1);                                         // L_: [fixed] args... n "modname" error          L2:
+                            raise_lua_error(L_);
+                        }
+                        // here the module was successfully required                               // L_: [fixed] args... n "modname"                L2: ret
+                        // after requiring the module, register the functions it exported in our name<->function database
+                        tools::PopulateFuncLookupTable(L2_, kIdxTop, _name);
+                        lua_pop(L2_, 1);                                                           // L_: [fixed] args... n "modname"                L2:
+                    }
+                }
+                lua_pop(L_, 1);                                                                    // L_: [fixed] args... n                          L2:
+                ++_nbRequired;
+            }                                                                                      // L_: [fixed] args...
+        }
+
+        // Transfer each key/value pair from globalsIdx_ into the lane's global environment (_G).
+        // Must be called after stdlibs are loaded and modules required, so that references to
+        // native functions those exposed can be resolved. No-op when globalsIdx_ is nil/none.
+        static void TransferGlobals(Universe* const U_, lua_State* const L_, lua_State* const L2_, StackIndex const globalsIdx_)
+        {
+            if (lua_isnoneornil(L_, globalsIdx_)) {
+                return;
+            }
+            DEBUGSPEW_CODE(DebugSpew(U_) << "lane_new: transfer globals" << std::endl);
+            if (!lua_istable(L_, globalsIdx_)) {
+                raise_luaL_error(L_, "Expected table, got %s", luaL_typename(L_, globalsIdx_));
+            }
+
+            DEBUGSPEW_CODE(DebugSpewIndentScope _scope{ U_ });
+            lua_pushnil(L_);                                                                       // L_: [fixed] args... nil                        L2:
+            // Lua 5.2 wants us to push the globals table on the stack
+            InterCopyContext _c{ U_, DestState{ L2_ }, SourceState{ L_ }, {}, {}, {}, {}, {} };
+            luaW_pushglobaltable(L2_);                                                             // L_: [fixed] args... nil                        L2: _G
+            while (lua_next(L_, globalsIdx_)) {                                                    // L_: [fixed] args... k v                        L2: _G
+                std::ignore = _c.interCopy(2);                                                     // L_: [fixed] args... k v                        L2: _G k v
+                // assign it in L2's globals table
+                lua_rawset(L2_, -3);                                                               // L_: [fixed] args... k v                        L2: _G
+                lua_pop(L_, 1);                                                                    // L_: [fixed] args... k
+            }                                                                                      // L_: [fixed] args...
+            lua_pop(L2_, 1);                                                                       // L_: [fixed] args...                            L2:
+        }
+
+        // Push the optional error handler onto L2, then transfer the lane body (a Lua function or
+        // a string to be compiled) from L_ into L2_. Returns the error handler count (0 or 1) so
+        // the caller can assert the correct L2 stack depth after arguments are transferred.
+        [[nodiscard]]
+        static int TransferLaneBody(Universe* const U_, lua_State* const L_, lua_State* const L2_, StackIndex const funcIdx_, Lane* const lane_)
+        {
+            int const _errorHandlerCount{ lane_->pushErrorHandler() };                             // L_: [fixed] args...                            L2: eh?
+            LuaType const _func_type{ luaW_type(L_, funcIdx_) };
+            if (_func_type == LuaType::FUNCTION) {
+                DEBUGSPEW_CODE(DebugSpew(U_) << "lane_new: transfer lane body" << std::endl);
+                DEBUGSPEW_CODE(DebugSpewIndentScope _scope{ U_ });
+                lua_pushvalue(L_, funcIdx_);                                                       // L_: [fixed] args... func                       L2: eh?
+                InterCopyContext _c{ U_, DestState{ L2_ }, SourceState{ L_ }, {}, {}, {}, {}, {} };
+                InterCopyResult const _res{ _c.interMove(1) };                                     // L_: [fixed] args...                            L2: eh? func
+                if (_res != InterCopyResult::Success) {
+                    raise_luaL_error(L_, "tried to copy unsupported types");
+                }
+            } else if (_func_type == LuaType::STRING) {
+                DEBUGSPEW_CODE(DebugSpew(U_) << "lane_new: compile lane body" << std::endl);
+                // compile the string
+                if (luaL_loadstring(L2_, lua_tostring(L_, funcIdx_)) != 0) {                       // L_: [fixed] args...                            L2: eh? func
+                    raise_luaL_error(L_, "error when parsing lane function code");
+                }
+            } else {
+                raise_luaL_error(L_, "Expected function, got %s", luaW_typename(L_, _func_type).data());
+            }
+            return _errorHandlerCount;
+        }
+
+        // Inter-move nargs_ values from L_ into L2_. No-op when nargs_ is zero.
+        static void TransferArguments(Universe* const U_, lua_State* const L_, lua_State* const L2_, int const nargs_)
+        {
+            if (nargs_ == 0) {
+                return;
+            }
+            DEBUGSPEW_CODE(DebugSpew(U_) << "lane_new: transfer lane arguments" << std::endl);
+            DEBUGSPEW_CODE(DebugSpewIndentScope _scope{ U_ });
+            InterCopyContext _c{ U_, DestState{ L2_ }, SourceState{ L_ }, {}, {}, {}, {}, {} };
+            InterCopyResult const _res{ _c.interMove(nargs_) };                                    // L_: [fixed]                                    L2: eh? func args...
+            if (_res != InterCopyResult::Success) {
+                raise_luaL_error(L_, "tried to copy unsupported types");
+            }
+        }
+
+        // Create and push the Lane full userdata onto L_, attach its metatable (upvalue 1) and a
+        // uservalue table, optionally store the gc_cb callback, and set the lane's debug name.
+        static void PrepareLaneUserData(lua_State* const L_, Lane* const lane_, StackIndex const gcCbIdx_, StackIndex const nameIdx_, StackIndex const funcIdx_)
+        {
+            DEBUGSPEW_CODE(DebugSpew(lane_->U) << "lane_new: preparing lane userdata" << std::endl);
+            STACK_GROW(L_, 4);
+            STACK_CHECK_START_REL(L_, 0);
+            // a Lane full userdata needs a single uservalue
+            Lane** const _ud{ luaW_newuserdatauv<Lane*>(L_, UserValueCount{ 1 }) };                // L_: ... lane
+            *_ud = lane_; // don't forget to store the pointer in the userdata!
+
+            // Set metatable for the userdata
+            lua_pushvalue(L_, lua_upvalueindex(1));                                                // L_: ... lane mt
+            lua_setmetatable(L_, -2);                                                              // L_: ... lane
+            STACK_CHECK(L_, 1);
+
+            // Create uservalue for the userdata. There can be only one that must be a table, due to Lua 5.1 compatibility.
+            // (this is where lane body return values will be stored when the handle is indexed by a numeric key)
+            lua_newtable(L_);                                                                      // L_: ... lane {uv}
+
+            // Store the gc_cb callback in the uservalue
+            StackIndex const _gc_cb_idx{ lua_isnoneornil(L_, gcCbIdx_) ? kIdxNone : gcCbIdx_ };
+            if (_gc_cb_idx > 0) {
+                kLaneGC.pushKey(L_);                                                               // L_: ... lane {uv} k
+                lua_pushvalue(L_, _gc_cb_idx);                                                     // L_: ... lane {uv} k gc_cb
+                lua_rawset(L_, -3);                                                                // L_: ... lane {uv}
+            }
+            STACK_CHECK(L_, 2);
+            // store the uservalue in the Lane full userdata
+            lua_setiuservalue(L_, StackIndex{ -2 }, UserValueIndex{ 1 });                          // L_: ... lane
+
+            StackIndex const _name_idx{ lua_isnoneornil(L_, nameIdx_) ? kIdxNone : nameIdx_ };
+            std::string_view _debugName{ (_name_idx > 0) ? luaW_tostring(L_, _name_idx) : std::string_view{} };
+            if (!_debugName.empty()) {
+                if (_debugName == "auto") {
+                    if (luaW_type(L_, funcIdx_) == LuaType::STRING) {
+                        lua_Debug _ar;
+                        if (lua_getstack(L_, 2, &_ar) == 0) { // 0 is here, 1 is lanes.gen, 2 is its caller
+                            lua_getstack(L_, 1, &_ar); // level 2 may not exist with LuaJIT, try again with level 1
+                        }
+                        lua_getinfo(L_, "Sl", &_ar);
+                        luaW_pushstring(L_, "%s:%d", _ar.short_src, _ar.currentline);              // L_: ... lane "<name>"
+                    } else {
+                        lua_Debug _ar;
+                        lua_pushvalue(L_, funcIdx_);                                               // L_: ... lane func
+                        lua_getinfo(L_, ">S", &_ar);                                               // L_: ... lane
+                        luaW_pushstring(L_, "%s:%d", _ar.short_src, _ar.linedefined);              // L_: ... lane "<name>"
+                    }
+                    lua_replace(L_, _name_idx);                                                    // L_: ... lane
+                    _debugName = luaW_tostring(L_, _name_idx);
+                }
+                lane_->storeDebugName(_debugName);
+            }
+            STACK_CHECK(L_, 1);
+        }
+    } // namespace local
+} // namespace
+
+// #################################################################################################
+
 //--- [] means can be nil
 // lane_ud = lane_new( function
 //                   , [libs_str]
@@ -277,319 +500,132 @@ LUAG_FUNC(thread_priority_range)
 //
 LUAG_FUNC(lane_new)
 {
-    static constexpr StackIndex kFuncIdx{ 1 };
-    static constexpr StackIndex kLibsIdx{ 2 };
-    static constexpr StackIndex kPrinIdx{ 3 };
-    static constexpr StackIndex kPrioIdx{ 4 };
-    static constexpr StackIndex kGlobIdx{ 5 };
-    static constexpr StackIndex kPackIdx{ 6 };
-    static constexpr StackIndex kRequIdx{ 7 };
-    static constexpr StackIndex kGcCbIdx{ 8 };
-    static constexpr StackIndex kNameIdx{ 9 };
-    static constexpr StackIndex kErTlIdx{ 10 };
-    static constexpr StackIndex kAsCoro{ 11 };
-    static constexpr StackIndex kFixedArgsIdx{ 11 };
+    // this is to communicate the lane pointer back to us from inside the protected call
+    Lane* _lane{};
 
-    int const _nargs{ lua_gettop(L_) - kFixedArgsIdx };
-    LUA_ASSERT(L_, _nargs >= 0);
-
-    Universe* const _U{ Universe::Get(L_) };
-    DEBUGSPEW_CODE(DebugSpew(_U) << "lane_new: setup" << std::endl);
-
-    std::optional<std::string_view> _libs_str{ lua_isnil(L_, kLibsIdx) ? std::nullopt : std::make_optional(luaW_tostring(L_, kLibsIdx)) };
-    lua_State* const _S{ state::NewLaneState(_U, SourceState{ L_ }, _libs_str) };                 // L_: [fixed] ...                                L2:
-    STACK_CHECK_START_REL(_S, 0);
-
-    // 'lane' is allocated from heap, not Lua, since its life span may surpass the handle's (if free running thread)
-    Lane::ErrorTraceLevel const _errorTraceLevel{ static_cast<Lane::ErrorTraceLevel>(lua_tointeger(L_, kErTlIdx)) };
-    bool const _asCoroutine{ lua_toboolean(L_, kAsCoro) ? true : false };
-    Lane* const _lane{ new (_U) Lane{ _U, _S, _errorTraceLevel, _asCoroutine } };
-    STACK_CHECK(_S, _asCoroutine ? 1 : 0); // the Lane's thread is on the Lane's state stack
-    lua_State* const _L2{ _lane->L };
-    STACK_CHECK_START_REL(_L2, 0);
-    if (_lane == nullptr) {
-        raise_luaL_error(L_, "could not create lane: out of memory");
-    }
-
-    class OnExit final
+    auto _protectedLaneNew = [](lua_State* const L_) // stateless lambda convertible to a lua_CFunction
     {
-        private:
-        lua_State* const L;
-        Lane* lane{ nullptr };
-        DEBUGSPEW_CODE(DebugSpewIndentScope scope);
+        static constexpr StackIndex kFuncIdx{ 1 };
+        static constexpr StackIndex kLibsIdx{ 2 };
+        static constexpr StackIndex kPrinIdx{ 3 };
+        static constexpr StackIndex kLaneIdx{ 3 }; // <-- this is where the Lane userdata is stored (after prio is read from the stack)
+        static constexpr StackIndex kPrioIdx{ 4 };
+        static constexpr StackIndex kGlobIdx{ 5 };
+        static constexpr StackIndex kPackIdx{ 6 };
+        static constexpr StackIndex kRequIdx{ 7 };
+        static constexpr StackIndex kGcCbIdx{ 8 };
+        static constexpr StackIndex kNameIdx{ 9 };
+        static constexpr StackIndex kErTlIdx{ 10 };
+        static constexpr StackIndex kCoroIdx{ 11 };
+        static constexpr StackIndex kFixedArgsIdx{ 11 };
 
-        public:
-        OnExit(lua_State* L_, Lane* lane_)
-        : L{ L_ }
-        , lane{ lane_ }
-        DEBUGSPEW_COMMA_PARAM(scope{ lane_->U })
-        {
+        int const _nargs{ lua_gettop(L_) - kFixedArgsIdx };
+        LUA_ASSERT(L_, _nargs >= 0);
+
+        Universe* const _U{ Universe::Get(L_) };
+        DEBUGSPEW_CODE(DebugSpew(_U) << "lane_new: setup" << std::endl);
+
+        // Get priority early, because it can fail by raising an error
+        auto const [_priority, _native]{ local::ResolveLanePriority(L_, kPrinIdx, kPrioIdx) };
+
+        std::optional<std::string_view> _libs_str{ lua_isnil(L_, kLibsIdx) ? std::nullopt : std::make_optional(luaW_tostring(L_, kLibsIdx)) };
+        lua_State* const _S{ state::NewLaneState(_U, SourceState{ L_ }, _libs_str) };                  // L_: [fixed] ...                                L2:
+        STACK_CHECK_START_REL(_S, 0);
+
+        Lane::ErrorTraceLevel const _errorTraceLevel{ static_cast<Lane::ErrorTraceLevel>(lua_tointeger(L_, kErTlIdx)) };
+        bool const _asCoroutine{ lua_toboolean(L_, kCoroIdx) ? true : false };
+
+        // 'lane' is allocated from heap, not Lua, since its life span may surpass the handle's (if free running thread)
+        Lane* const _lane{ new (_U) Lane{ _U, _S, _errorTraceLevel, _asCoroutine } };
+        if (_lane == nullptr) {
+            raise_luaL_error(L_, "could not create lane: out of memory");
         }
+        // write back to the outer _lane variable so it can call signalReady()
+        *static_cast<Lane**>(lua_touserdata(L_, lua_upvalueindex(2))) = _lane;
 
-        ~OnExit()
-        {
-            if (lane) {
-                STACK_CHECK_START_REL(L, 0);
-                // we still need a full userdata so that garbage collection can do its thing
-                prepareUserData();
-                // remove it immediately from the stack so that the error that landed us here is at the top
-                lua_pop(L, 1);
-                STACK_CHECK(L, 0);
-                // leave a single cancel_error on the stack for the caller
-                lua_settop(lane->L, 0);
-                kCancelError.pushKey(lane->L);
-                {
-                    std::lock_guard _guard{ lane->doneMutex };
-                    // this will cause lane_main to skip actual running (because we are not Pending anymore)
-                    lane->status.store(Lane::Running, std::memory_order_release);
-                }
-                // unblock the thread so that it can terminate gracefully
-#ifndef __PROSPERO__
-                lane->ready.count_down();
-#else // __PROSPERO__
-                lane->ready.test_and_set();
-#endif // __PROSPERO__
-            }
+        STACK_CHECK(_S, _asCoroutine ? 1 : 0); // the Lane's thread is on the Lane's state stack
+        lua_State* const _L2{ _lane->L };
+        STACK_CHECK_START_REL(_L2, 0);
+
+        DEBUGSPEW_CODE(DebugSpew(_U) << "lane_new: launching thread" << std::endl);
+
+        // launch the thread early, it will sync with a std::latch to parallelize OS thread warmup and L2 preparation
+        _lane->startThread(L_, _priority, _native);
+
+        STACK_CHECK_START_REL(L_, 0);
+
+        // create the wrapping full userdata, so that it can be cleaned up properly in case of error
+        local::PrepareLaneUserData(L_, _lane, kGcCbIdx, kNameIdx, kFuncIdx);                       // L_: [fixed] args... LaneUD
+        STACK_CHECK(L_, 1);
+        // store the userdata in a reusable stack slot until we know everything went well
+        lua_replace(L_, kLaneIdx);                                                                 // L_: [fixed] args...
+
+        STACK_GROW(_L2, _nargs + 3);
+        STACK_GROW(L_, 3);
+
+        // package
+        local::TransferPackage(_U, L_, _L2, kPackIdx);
+        STACK_CHECK(L_, 0);
+        STACK_CHECK(_L2, 0);
+
+        // modules to require in the target lane *before* the function is transfered!
+        local::RequireModulesInLane(_U, L_, _L2, kRequIdx);
+        STACK_CHECK(L_, 0);
+        STACK_CHECK(_L2, 0);                                                                       // L_: [fixed] args...                            L2:
+
+        // Appending the specified globals to the global environment
+        // *after* stdlibs have been loaded and modules required, in case we transfer references to native functions they exposed...
+        local::TransferGlobals(_U, L_, _L2, kGlobIdx);
+        STACK_CHECK(L_, 0);
+        STACK_CHECK(_L2, 0);
+
+        // Lane main function, optionally preceded by an error handler (depending on error_trace_level setting)
+        int const _errorHandlerCount{ local::TransferLaneBody(_U, L_, _L2, kFuncIdx, _lane) };     // L_: [fixed] args...                            L2: eh? func
+        STACK_CHECK(L_, 0);
+        STACK_CHECK(_L2, _errorHandlerCount + 1);
+        LUA_ASSERT(L_, lua_isfunction(_L2, _errorHandlerCount + 1));
+
+        // *Move* arguments in the lane state
+        local::TransferArguments(_U, L_, _L2, _nargs);                                             // L_: [fixed]                                    L2: eh? func args...
+        STACK_CHECK(L_, -_nargs);
+        LUA_ASSERT(L_, lua_gettop(L_) == kFixedArgsIdx);
+        STACK_CHECK(_L2, _errorHandlerCount + 1 + _nargs);
+
+        // if in coroutine mode, the Lane's master state stack should contain the thread
+        if (_asCoroutine) {
+            LUA_ASSERT(L_, _S != _L2);
+            STACK_CHECK(_S, 1);
         }
+        // and the thread's stack has whatever is needed to run
+        STACK_CHECK(_L2, _errorHandlerCount + 1 + _nargs);
 
-        private:
-        void prepareUserData()
-        {
-            DEBUGSPEW_CODE(DebugSpew(lane->U) << "lane_new: preparing lane userdata" << std::endl);
-            STACK_CHECK_START_REL(L, 0);
-            // a Lane full userdata needs a single uservalue
-            Lane** const _ud{ luaW_newuserdatauv<Lane*>(L, UserValueCount{ 1 }) };                 // L: ... lane
-            *_ud = lane; // don't forget to store the pointer in the userdata!
-
-            // Set metatable for the userdata
-            lua_pushvalue(L, lua_upvalueindex(1));                                                 // L: ... lane mt
-            lua_setmetatable(L, -2);                                                               // L: ... lane
-            STACK_CHECK(L, 1);
-
-            // Create uservalue for the userdata. There can be only one that must be a table, due to Lua 5.1 compatibility.
-            // (this is where lane body return values will be stored when the handle is indexed by a numeric key)
-            lua_newtable(L);                                                                       // L: ... lane {uv}
-
-            // Store the gc_cb callback in the uservalue
-            StackIndex const _gc_cb_idx{ lua_isnoneornil(L, kGcCbIdx) ? kIdxNone : kGcCbIdx };
-            if (_gc_cb_idx > 0) {
-                kLaneGC.pushKey(L);                                                                // L: ... lane {uv} k
-                lua_pushvalue(L, _gc_cb_idx);                                                      // L: ... lane {uv} k gc_cb
-                lua_rawset(L, -3);                                                                 // L: ... lane {uv}
-            }
-            STACK_CHECK(L, 2);
-            // store the uservalue in the Lane full userdata
-            lua_setiuservalue(L, StackIndex{ -2 }, UserValueIndex{ 1 });                           // L: ... lane
-
-            StackIndex const _name_idx{ lua_isnoneornil(L, kNameIdx) ? kIdxNone : kNameIdx };
-            std::string_view _debugName{ (_name_idx > 0) ? luaW_tostring(L, _name_idx) : std::string_view{} };
-            if (!_debugName.empty())
-            {
-                if (_debugName == "auto") {
-                    if (luaW_type(L, kFuncIdx) == LuaType::STRING) {
-                        lua_Debug _ar;
-                        if (lua_getstack(L, 2, &_ar) == 0) { // 0 is here, 1 is lanes.gen, 2 is its caller
-                            lua_getstack(L, 1, &_ar); // level 2 may not exist with LuaJIT, try again with level 1
-                        }
-                        lua_getinfo(L, "Sl", &_ar);
-                        luaW_pushstring(L, "%s:%d", _ar.short_src, _ar.currentline);               // L: ... lane "<name>"
-                    } else {
-                        lua_Debug _ar;
-                        lua_pushvalue(L, kFuncIdx);                                                // L: ... lane func
-                        lua_getinfo(L, ">S", &_ar);                                                // L: ... lane
-                        luaW_pushstring(L, "%s:%d", _ar.short_src, _ar.linedefined);               // L: ... lane "<name>"
-                    }
-                    lua_replace(L, _name_idx);                                                     // L: ... lane
-                    _debugName = luaW_tostring(L, _name_idx);
-                }
-                lane->storeDebugName(_debugName);
-            }
-            STACK_CHECK(L, 1);
-        }
-
-        public:
-        void success()
-        {
-            prepareUserData();
-            // unblock the thread so that it can terminate gracefully
-#ifndef __PROSPERO__
-            lane->ready.count_down();
-#else // __PROSPERO__
-            lane->ready.test_and_set();
-#endif // __PROSPERO__
-            lane = nullptr;
-        }
-    } _onExit{ L_, _lane};
-    // launch the thread early, it will sync with a std::latch to parallelize OS thread warmup and L2 preparation
-    DEBUGSPEW_CODE(DebugSpew(_U) << "lane_new: launching thread" << std::endl);
-    // public Lanes API accepts a generic range -3/+3
-    // that will be remapped into the platform-specific scheduler priority scheme
-    // On some platforms, -3 is equivalent to -2 and +3 to +2
-    auto const [_priority, _native] {
-        std::invoke([L = L_]() {
-            NativePrioFlag const _native{ static_cast<bool>(lua_toboolean(L, kPrinIdx)) };
-            StackIndex const _prio_idx{ lua_isnoneornil(L, kPrioIdx) ? kIdxNone : kPrioIdx };
-            if (_prio_idx == kIdxNone) {
-                return std::make_pair(kThreadPrioDefault, _native);
-            }
-            int const _priority{ static_cast<int>(lua_tointeger(L, _prio_idx)) };
-            if (!_native && (_priority < kThreadPrioMin || _priority > kThreadPrioMax)) {
-                raise_luaL_error(L, "Priority out of range: %d..+%d (%d)", kThreadPrioMin, kThreadPrioMax, _priority);
-            }
-            return std::make_pair(_priority, _native);
-        })
+        // all went well, return the LaneUD by cutting the stack at the position we stored it earlier
+        lua_settop(L_, kLaneIdx);                                                                  // L_: ... lane                                   L2: <living its own life>
+        return 1;
     };
 
-    _lane->startThread(L_, _priority, _native);
-
-    STACK_GROW(_L2, _nargs + 3);
-    STACK_GROW(L_, 3);
-    STACK_CHECK_START_REL(L_, 0);
-
-    // package
-    StackIndex const _package_idx{ lua_isnoneornil(L_, kPackIdx) ? kIdxNone : kPackIdx };
-    if (_package_idx != 0) {
-        DEBUGSPEW_CODE(DebugSpew(_U) << "lane_new: update 'package'" << std::endl);
-        // when copying with mode LookupMode::LaneBody, should raise an error in case of problem, not leave it one the stack
-        InterCopyContext _c{ _U, DestState{ _L2 }, SourceState{ L_ }, {}, SourceIndex{ _package_idx }, {}, {}, {} };
-        [[maybe_unused]] InterCopyResult const _ret{ _c.interCopyPackage() };
-        LUA_ASSERT(L_, _ret == InterCopyResult::Success); // either all went well, or we should not even get here
-    }
-    STACK_CHECK(L_, 0);
-    STACK_CHECK(_L2, 0);
-
-    // modules to require in the target lane *before* the function is transfered!
-    StackIndex const _required_idx{ lua_isnoneornil(L_, kRequIdx) ? kIdxNone : kRequIdx };
-    if (_required_idx != 0) {
-        int _nbRequired{ 1 };
-        DEBUGSPEW_CODE(DebugSpew(_U) << "lane_new: process 'required' list" << std::endl);
-        DEBUGSPEW_CODE(DebugSpewIndentScope _scope{ _U });
-        // should not happen, was checked in lanes.lua before calling lane_new()
-        if (luaW_type(L_, _required_idx) != LuaType::TABLE) {
-            raise_luaL_error(L_, "expected required module list as a table, got %s", luaL_typename(L_, _required_idx));
+    // the protected closure has a 2 uservalues:
+    // - uv#1 is our own uservalue (the Lane userdata's metatable)
+    // - uv#2: a pointer to our local variable _lane, to give us back the Lane pointer
+    lua_pushvalue(L_, lua_upvalueindex(1));                                                        // L_: nil [fixed] args... mt
+    lua_pushlightuserdata(L_, &_lane);                                                             // L_: nil [fixed] args... mt &_lane
+    lua_pushcclosure(L_, _protectedLaneNew, 2);                                                    // L_: nil [fixed] args... wrapped
+    lua_replace(L_, 1);                                                                            // L_: wrapped [fixed] args...
+    LuaError _rc{ lua_pcall(L_, lua_gettop(L_) - 1, 1, 0) };                                       // L_: lane|error
+    // _lane can be nullptr if we failed to allocate it!
+    if (_rc == LuaError::OK) {
+        // unblock the thread so that it can start doing its work
+        if (_lane) {
+            _lane->signalReady(true);
         }
-
-        lua_pushnil(L_);                                                                           // L_: [fixed] args... nil                        L2:
-        while (lua_next(L_, _required_idx) != 0) {                                                 // L_: [fixed] args... n "modname"                L2:
-            if (luaW_type(L_, kIdxTop) != LuaType::STRING || luaW_type(L_, StackIndex{ -2 }) != LuaType::NUMBER || lua_tonumber(L_, -2) != _nbRequired) {
-                raise_luaL_error(L_, "required module list should be a list of strings");
-            } else {
-                // require the module in the target state, and populate the lookup table there too
-                std::string_view const _name{ luaW_tostring(L_, kIdxTop) };
-                DEBUGSPEW_CODE(DebugSpew(_U) << "lane_new: require '" << _name << "'" << std::endl);
-
-                // require the module in the target lane
-                lua_getglobal(_L2, "require");                                                     // L_: [fixed] args... n "modname"                L2: require()?
-                if (lua_isnil(_L2, -1)) {
-                    lua_pop(_L2, 1);                                                               // L_: [fixed] args... n "modname"                L2:
-                    raise_luaL_error(L_, "cannot pre-require modules without loading 'package' library first");
-                } else {
-                    luaW_pushstring(_L2, _name);                                                   // L_: [fixed] args... n "modname"                L2: require() name
-                    LuaError const _rc{ lua_pcall(_L2, 1, 1, 0) };                                 // L_: [fixed] args... n "modname"                L2: ret/errcode
-                    if (_rc != LuaError::OK) {
-                        // propagate error to main state if any
-                        InterCopyContext _c{ _U, DestState{ L_ }, SourceState{ _L2 }, {}, {}, {}, {}, {} };
-                        std::ignore = _c.interMove(1);                                             // L_: [fixed] args... n "modname" error          L2:
-                        raise_lua_error(L_);
-                    }
-                    // here the module was successfully required                                   // L_: [fixed] args... n "modname"                L2: ret
-                    // after requiring the module, register the functions it exported in our name<->function database
-                    tools::PopulateFuncLookupTable(_L2, kIdxTop, _name);
-                    lua_pop(_L2, 1);                                                               // L_: [fixed] args... n "modname"                L2:
-                }
-            }
-            lua_pop(L_, 1);                                                                        // L_: [fixed] args... n                          L2:
-            ++_nbRequired;
-        }                                                                                          // L_: [fixed] args...
-    }
-    STACK_CHECK(L_, 0);
-    STACK_CHECK(_L2, 0);                                                                           // L_: [fixed] args...                            L2:
-
-    // Appending the specified globals to the global environment
-    // *after* stdlibs have been loaded and modules required, in case we transfer references to native functions they exposed...
-    //
-    StackIndex const _globals_idx{ lua_isnoneornil(L_, kGlobIdx) ? kIdxNone : kGlobIdx };
-    if (_globals_idx != 0) {
-        DEBUGSPEW_CODE(DebugSpew(_U) << "lane_new: transfer globals" << std::endl);
-        if (!lua_istable(L_, _globals_idx)) {
-            raise_luaL_error(L_, "Expected table, got %s", luaL_typename(L_, _globals_idx));
-        }
-
-        DEBUGSPEW_CODE(DebugSpewIndentScope _scope{ _U });
-        lua_pushnil(L_);                                                                           // L_: [fixed] args... nil                        L2:
-        // Lua 5.2 wants us to push the globals table on the stack
-        InterCopyContext _c{ _U, DestState{ _L2 }, SourceState{ L_ }, {}, {}, {}, {}, {} };
-        luaW_pushglobaltable(_L2);                                                                 // L_: [fixed] args... nil                        L2: _G
-        while (lua_next(L_, _globals_idx)) {                                                       // L_: [fixed] args... k v                        L2: _G
-            std::ignore = _c.interCopy(2);                                                         // L_: [fixed] args... k v                        L2: _G k v
-            // assign it in L2's globals table
-            lua_rawset(_L2, -3);                                                                   // L_: [fixed] args... k v                        L2: _G
-            lua_pop(L_, 1);                                                                        // L_: [fixed] args... k
-        }                                                                                          // L_: [fixed] args...
-        lua_pop(_L2, 1);                                                                           // L_: [fixed] args...                            L2:
-    }
-    STACK_CHECK(L_, 0);
-    STACK_CHECK(_L2, 0);
-
-    // Lane main function
-    [[maybe_unused]] int const _errorHandlerCount{ _lane->pushErrorHandler() };                    // L_: [fixed] args...                            L2: eh?
-    LuaType const _func_type{ luaW_type(L_, kFuncIdx) };
-    if (_func_type == LuaType::FUNCTION) {
-        DEBUGSPEW_CODE(DebugSpew(_U) << "lane_new: transfer lane body" << std::endl);
-        DEBUGSPEW_CODE(DebugSpewIndentScope _scope{ _U });
-        lua_pushvalue(L_, kFuncIdx);                                                               // L_: [fixed] args... func                       L2: eh?
-        InterCopyContext _c{ _U, DestState{ _L2 }, SourceState{ L_ }, {}, {}, {}, {}, {} };
-        InterCopyResult const _res{ _c.interMove(1) };                                             // L_: [fixed] args...                            L2: eh? func
-        if (_res != InterCopyResult::Success) {
-            raise_luaL_error(L_, "tried to copy unsupported types");
-        }
-    } else if (_func_type == LuaType::STRING) {
-        DEBUGSPEW_CODE(DebugSpew(_U) << "lane_new: compile lane body" << std::endl);
-        // compile the string
-        if (luaL_loadstring(_L2, lua_tostring(L_, kFuncIdx)) != 0) {                               // L_: [fixed] args...                            L2: eh? func
-            raise_luaL_error(L_, "error when parsing lane function code");
-        }
+        return 1;
     } else {
-        raise_luaL_error(L_, "Expected function, got %s", luaW_typename(L_, _func_type).data());
-    }
-    STACK_CHECK(L_, 0);
-    STACK_CHECK(_L2, _errorHandlerCount + 1);
-    LUA_ASSERT(L_, lua_isfunction(_L2, _errorHandlerCount + 1));
-
-    // revive arguments
-    if (_nargs > 0) {
-        DEBUGSPEW_CODE(DebugSpew(_U) << "lane_new: transfer lane arguments" << std::endl);
-        DEBUGSPEW_CODE(DebugSpewIndentScope _scope{ _U });
-        InterCopyContext _c{ _U, DestState{ _L2 }, SourceState{ L_ }, {}, {}, {}, {}, {} };
-        InterCopyResult const res{ _c.interMove(_nargs) };                                         // L_: [fixed]                                    L2: eh? func args...
-        if (res != InterCopyResult::Success) {
-            raise_luaL_error(L_, "tried to copy unsupported types");
+        // unblock the thread so that it can terminate gracefully (but will abort early)
+        if (_lane) {
+            _lane->signalReady(false);
         }
+        raise_lua_error(L_);
     }
-    STACK_CHECK(L_, -_nargs);
-    LUA_ASSERT(L_, lua_gettop(L_) == kFixedArgsIdx);
-    STACK_CHECK(_L2, _errorHandlerCount + 1 + _nargs);
-
-    // Store 'lane' in the lane's registry, for 'cancel_test()' (we do cancel tests at pending send/receive).
-    kLanePointerRegKey.setValue(
-        _L2, [lane = _lane](lua_State* L_) { lua_pushlightuserdata(L_, lane); }                    // L_: [fixed]                                    L2: eh? func args...
-    );
-    STACK_CHECK(_L2, _errorHandlerCount + 1 + _nargs);
-
-    // if in coroutine mode, the Lane's master state stack should contain the thread
-    if (_asCoroutine) {
-        LUA_ASSERT(L_, _S != _L2);
-        STACK_CHECK(_S, 1);
-    }
-    // and the thread's stack has whatever is needed to run
-    STACK_CHECK(_L2, _errorHandlerCount + 1 + _nargs);
-
-    STACK_CHECK_RESET_REL(L_, 0);
-    // all went well, the lane's thread can start working
-    _onExit.success();                                                                             // L_: [fixed] lane                               L2: <living its own life>
-    // we should have the lane userdata on top of the stack
-    STACK_CHECK(L_, 1);
-    return 1;
 }
 
 // #################################################################################################

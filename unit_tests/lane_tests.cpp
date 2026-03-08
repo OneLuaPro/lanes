@@ -128,9 +128,11 @@ TEST_CASE("lanes.sleep.argument_validation/numbers")
     // negative durations are not supported
     S.requireFailure("lanes.sleep(-1)");
 
-    // no duration is supported (same as 0)
-    S.requireSuccess("lanes.sleep()");
+    // no duration is supported
     S.requireSuccess("lanes.sleep(0)");
+
+    // positive durations are supported
+    S.requireSuccess("lanes.sleep(0.1)");
 }
 
 // #################################################################################################
@@ -161,7 +163,7 @@ TEST_CASE("lanes.sleep.interactions with timers")
         " lanes.timer(l, 'gluh', 0.1, 0.1)"
         // launch a lane that is supposed to sleep forever
         " local g = lanes.gen('*', { name = 'auto' }, lanes.sleep)"
-        " local h = g('indefinitely')"
+        " local h = g(nil)"
         // sleep 1 second (this uses the timer linda)
         " lanes.sleep(1)"
         // shutdown should be able to cancel the lane and stop it instantly
@@ -266,11 +268,23 @@ TEST_CASE("lanes.gen.priority")
     LuaState S{ LuaState::WithBaseLibs{ true }, LuaState::WithFixture{ false } };
     S.requireSuccess("lanes = require 'lanes'.configure()");
 
-    S.requireSuccess("lanes.gen({priority=1}, function() end)");
-    // AFAICT, 1 is accepted by all pthread flavors and win32 API
-    S.requireSuccess("lanes.gen({native_priority=1}, function() end)");
     // shouldn't be able to provide 2 priority settings
     S.requireFailure("lanes.gen({priority=1, native_priority=1}, function() end)");
+
+    // should fail if prio is out of range, but succeed otherwise
+    S.requireSuccess("lanes.gen({priority=-3}, function() end)()");
+    S.requireSuccess("lanes.gen({priority=0}, function() end)()");
+    S.requireSuccess("lanes.gen({priority=1}, function() end)()");
+    S.requireSuccess("lanes.gen({priority=3}, function() end)()");
+    S.requireFailure("lanes.gen({priority=-4, }, function() end)()");
+    S.requireFailure("lanes.gen({priority=4, }, function() end)()");
+
+    // same for native priorities
+    S.requireSuccess("local a,b = lanes.thread_priority_range('native'); lanes.gen({native_priority=a}, function() end)()");
+    S.requireSuccess("local a,b = lanes.thread_priority_range('native'); lanes.gen({native_priority=(a+b)/2}, function() end)()");
+    S.requireSuccess("local a,b = lanes.thread_priority_range('native'); lanes.gen({native_priority=b}, function() end)()");
+    S.requireFailure("local a,b = lanes.thread_priority_range('native'); lanes.gen({native_priority=a-1}, function() end)()");
+    S.requireFailure("local a,b = lanes.thread_priority_range('native'); lanes.gen({native_priority=b+1}, function() end)()");
 }
 
 // #################################################################################################

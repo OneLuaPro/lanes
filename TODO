@@ -14,3 +14,15 @@ maining standard libraries (io, os, table, string, math, and debug) are pre-regi
 can be loaded with a standard call to Lua’s require function. "
 
 - Lanes so/dll to have a second interface; C code sending data to a linda of given void*
+
+ ---
+  Documentation Errors in docs/index.html
+
+  ---
+  lanes.register() — full userdata accepted, wrong
+
+  Doc says: Raises an error if the registered module is not a function, table, or full userdata.
+  Code (lanes.cpp): Only checks for TABLE or FUNCTION:
+  luaL_argcheck(L_, (_mod_type == LuaType::TABLE) || (_mod_type == LuaType::FUNCTION), 2, "unexpected module type");
+  Full userdata is rejected, not accepted.
+  However, PopulateFuncLookupTable handles the USERDATA case, so this has to be investigated more.
